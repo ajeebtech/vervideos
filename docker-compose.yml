@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  vervids-storage:
+    build: .
+    container_name: vervids-storage
+    volumes:
+      - vervids-data:/storage/projects
+    restart: unless-stopped
+    networks:
+      - vervids-network
+
+volumes:
+  vervids-data:
+    driver: local
+
+networks:
+  vervids-network:
+    driver: bridge
+
