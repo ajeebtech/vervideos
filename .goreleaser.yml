@@ -52,11 +52,10 @@ changelog:
       - '^ci:'
 
 brews:
-  - name: vervideos
-    tap:
+  - repository:
       owner: ajeebtech
       name: homebrew-tap
-    folder: Formula
+    directory: Formula
     homepage: "https://github.com/ajeebtech/vervideos"
     description: "A versioning command-line tool for video editors"
     license: "MIT"
