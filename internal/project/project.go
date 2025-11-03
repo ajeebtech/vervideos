@@ -11,6 +11,7 @@ import (
 	"github.com/ajeebtech/vervideos/internal/assets"
 	"github.com/ajeebtech/vervideos/internal/docker"
 	"github.com/ajeebtech/vervideos/internal/storage"
+	"github.com/ajeebtech/vervideos/internal/tracking"
 )
 
 // AssetInfo represents an asset file tracked in a version
@@ -93,8 +94,10 @@ func Initialize(aepxFilePath string) (*Project, error) {
 	}
 
     // Store the project file and assets in Docker
+    // Use project filename (without extension) as project ID
     versionDir := fmt.Sprintf("v%03d", version.Number)
-    projectID := filepath.Base(filepath.Dir(aepxFilePath))
+    projectBaseName := strings.TrimSuffix(filepath.Base(aepxFilePath), filepath.Ext(aepxFilePath))
+    projectID := sanitizeProjectName(projectBaseName)
     dockerVersionDir := filepath.Join(docker.StoragePath, projectID, versionDir)
 
     if err := docker.CreateDirectory(dockerVersionDir); err != nil {
@@ -108,26 +111,60 @@ func Initialize(aepxFilePath string) (*Project, error) {
     }
     version.DockerPath = dockerProjectPath
 
-    // Copy assets
+    // Create shared assets directory at project level (not per version)
+    // Use the same projectID from above
+    sharedAssetsDir := filepath.Join(docker.StoragePath, projectID, "assets")
+    if err := docker.CreateDirectory(sharedAssetsDir); err != nil {
+        return nil, fmt.Errorf("failed to create shared assets directory in Docker: %w", err)
+    }
+
+    // Copy assets (only if they don't already exist in shared pool)
     for _, asset := range parseResult.Assets {
-        dockerAssetPath := filepath.Join(dockerVersionDir, "assets", asset.Filename)
-        if err := docker.CopyToContainer(asset.Path, dockerAssetPath); err != nil {
-            fmt.Printf("Warning: failed to copy asset %s: %v\n", asset.Filename, err)
-            continue
+        sharedAssetPath := filepath.Join(sharedAssetsDir, asset.Filename)
+        
+        // Check if asset already exists
+        if !docker.PathExistsInContainer(sharedAssetPath) {
+            // Copy new asset to shared pool
+            if err := docker.CopyToContainer(asset.Path, sharedAssetPath); err != nil {
+                fmt.Printf("Warning: failed to copy asset %s: %v\n", asset.Filename, err)
+                continue
+            }
+            fmt.Printf("✓ Copied new asset: %s\n", asset.Filename)
+        } else {
+            fmt.Printf("✓ Reusing existing asset: %s\n", asset.Filename)
         }
         
+        // Reference shared asset (not version-specific)
         version.Assets = append(version.Assets, AssetInfo{
             OriginalPath: asset.Path,
             RelativePath: asset.RelativePath,
             Filename:     asset.Filename,
             Extension:    asset.Extension,
             Size:         asset.Size,
-            DockerPath:   dockerAssetPath,
+            DockerPath:   sharedAssetPath, // Point to shared location
         })
     }
 
 	version.AssetCount = len(version.Assets)
 	version.TotalSize = parseResult.TotalSize
+
+	// Convert AssetInfo to AssetInfoInput for tracking
+	currentAssetsInput := make([]tracking.AssetInfoInput, len(version.Assets))
+	for i, asset := range version.Assets {
+		currentAssetsInput[i] = tracking.AssetInfoInput{
+			Filename:   asset.Filename,
+			Extension:  asset.Extension,
+			Size:       asset.Size,
+			DockerPath: asset.DockerPath,
+		}
+	}
+
+	// Create asset tracking for initial version (no previous version to compare)
+	track := tracking.CreateTracking(version.Number, version.Message, currentAssetsInput, []tracking.AssetInfoInput{})
+	if err := tracking.SaveTracking(version.Number, dockerVersionDir, track); err != nil {
+		fmt.Printf("Warning: failed to save asset tracking: %v\n", err)
+	}
+
 	proj.Versions = append(proj.Versions, version)
 
 	// Save config
@@ -157,6 +194,25 @@ func LoadFromPath(configPath string) (*Project, error) {
 	}
 
 	return &proj, nil
+}
+
+// sanitizeProjectName creates a safe project ID from a filename
+func sanitizeProjectName(name string) string {
+	// Remove invalid characters for filesystem/docker paths
+	name = strings.ReplaceAll(name, " ", "_")
+	name = strings.ReplaceAll(name, "/", "_")
+	name = strings.ReplaceAll(name, "\\", "_")
+	name = strings.ReplaceAll(name, "..", "_")
+	// Remove other potentially problematic characters
+	invalidChars := []string{":", "*", "?", "\"", "<", ">", "|"}
+	for _, char := range invalidChars {
+		name = strings.ReplaceAll(name, char, "_")
+	}
+	// Limit length
+	if len(name) > 100 {
+		name = name[:100]
+	}
+	return name
 }
 
 // Save saves the project to config.json
@@ -210,8 +266,10 @@ func (p *Project) Commit(message string) (*Version, error) {
     }
 
     // Store the file and assets in Docker
+    // Use project filename (without extension) as project ID
     versionDir := fmt.Sprintf("v%03d", version.Number)
-    projectID := filepath.Base(filepath.Dir(p.ProjectPath))
+    projectBaseName := strings.TrimSuffix(filepath.Base(p.ProjectPath), filepath.Ext(p.ProjectPath))
+    projectID := sanitizeProjectName(projectBaseName)
     dockerVersionDir := filepath.Join(docker.StoragePath, projectID, versionDir)
 
     if err := docker.CreateDirectory(dockerVersionDir); err != nil {
@@ -225,26 +283,86 @@ func (p *Project) Commit(message string) (*Version, error) {
     }
     version.DockerPath = dockerProjectPath
 
-    // Copy assets
+    // Use shared assets directory at project level
+    // Use the same projectID from above
+    sharedAssetsDir := filepath.Join(docker.StoragePath, projectID, "assets")
+    if err := docker.CreateDirectory(sharedAssetsDir); err != nil {
+        return nil, fmt.Errorf("failed to ensure shared assets directory exists: %w", err)
+    }
+
+    // Get all previously used assets from all previous versions
+    previousAssetsMap := make(map[string]string) // filename -> docker path
+    for _, prevVersion := range p.Versions {
+        for _, prevAsset := range prevVersion.Assets {
+            previousAssetsMap[prevAsset.Filename] = prevAsset.DockerPath
+        }
+    }
+
+    // Copy only new assets, reuse existing ones
     for _, asset := range parseResult.Assets {
-        dockerAssetPath := filepath.Join(dockerVersionDir, "assets", asset.Filename)
-        if err := docker.CopyToContainer(asset.Path, dockerAssetPath); err != nil {
-            fmt.Printf("Warning: failed to copy asset %s: %v\n", asset.Filename, err)
-            continue
+        sharedAssetPath := filepath.Join(sharedAssetsDir, asset.Filename)
+        
+        // Check if asset already exists in shared pool
+        if !docker.PathExistsInContainer(sharedAssetPath) {
+            // Copy new asset to shared pool
+            if err := docker.CopyToContainer(asset.Path, sharedAssetPath); err != nil {
+                fmt.Printf("Warning: failed to copy asset %s: %v\n", asset.Filename, err)
+                continue
+            }
+            fmt.Printf("✓ Copied new asset: %s\n", asset.Filename)
+        } else {
+            // Asset already exists, use existing path
+            if existingPath := previousAssetsMap[asset.Filename]; existingPath != "" {
+                sharedAssetPath = existingPath
+            }
+            fmt.Printf("✓ Reusing existing asset: %s\n", asset.Filename)
         }
         
+        // Reference shared asset
         version.Assets = append(version.Assets, AssetInfo{
             OriginalPath: asset.Path,
             RelativePath: asset.RelativePath,
             Filename:     asset.Filename,
             Extension:    asset.Extension,
             Size:         asset.Size,
-            DockerPath:   dockerAssetPath,
+            DockerPath:   sharedAssetPath, // Point to shared location
         })
     }
 
 	version.AssetCount = len(version.Assets)
 	version.TotalSize = parseResult.TotalSize
+
+	// Convert current AssetInfo to AssetInfoInput for tracking
+	currentAssetsInput := make([]tracking.AssetInfoInput, len(version.Assets))
+	for i, asset := range version.Assets {
+		currentAssetsInput[i] = tracking.AssetInfoInput{
+			Filename:   asset.Filename,
+			Extension:  asset.Extension,
+			Size:       asset.Size,
+			DockerPath: asset.DockerPath,
+		}
+	}
+
+	// Get previous version's assets for comparison
+	previousAssetsInput := make([]tracking.AssetInfoInput, 0)
+	if len(p.Versions) > 0 {
+		previousAssets := p.Versions[len(p.Versions)-1].Assets
+		previousAssetsInput = make([]tracking.AssetInfoInput, len(previousAssets))
+		for i, asset := range previousAssets {
+			previousAssetsInput[i] = tracking.AssetInfoInput{
+				Filename:   asset.Filename,
+				Extension:  asset.Extension,
+				Size:       asset.Size,
+				DockerPath: asset.DockerPath,
+			}
+		}
+	}
+
+	// Create asset tracking comparing with previous version
+	track := tracking.CreateTracking(version.Number, version.Message, currentAssetsInput, previousAssetsInput)
+	if err := tracking.SaveTracking(version.Number, dockerVersionDir, track); err != nil {
+		fmt.Printf("Warning: failed to save asset tracking: %v\n", err)
+	}
 
 	// Add version to project
 	p.Versions = append(p.Versions, version)
@@ -315,6 +433,43 @@ func GetAllProjects() ([]ProjectInfo, error) {
 			// Use the last part as project name
 			projectName = parts[len(parts)-1]
 		}
+		
+		// Try to find config.json to get actual project name
+		// Search in current directory and common project locations
+		home := os.Getenv("HOME")
+		searchDirs := []string{
+			".",
+			filepath.Join(home, "Documents"),
+			filepath.Join(home, "Desktop"),
+			filepath.Join(home, "Projects"),
+		}
+		
+		foundName := projectName // default
+		for _, baseDir := range searchDirs {
+			// Check if there's a directory matching the project name
+			if entries, err := os.ReadDir(baseDir); err == nil {
+				for _, entry := range entries {
+					if entry.IsDir() {
+						configPath := filepath.Join(baseDir, entry.Name(), storage.VerVidsDir, storage.ConfigFile)
+						if data, err := os.ReadFile(configPath); err == nil {
+							var proj Project
+							if json.Unmarshal(data, &proj) == nil {
+								// Check if this config's docker path matches
+								configProjectID := sanitizeProjectName(strings.TrimSuffix(proj.ProjectName, filepath.Ext(proj.ProjectName)))
+								if configProjectID == projectName || strings.Contains(projectName, configProjectID) || strings.Contains(configProjectID, projectName) {
+									foundName = strings.TrimSuffix(proj.ProjectName, filepath.Ext(proj.ProjectName))
+									break
+								}
+							}
+						}
+					}
+				}
+				if foundName != projectName {
+					break
+				}
+			}
+		}
+		projectName = foundName
 		
 		// Use full path as unique key to avoid duplicates
 		if projectName != "" && !seen[projectPath] {
