@@ -7,14 +7,14 @@ DATE ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
 build:
-	@echo "Building vervideos..."
-	@go build -ldflags "$(LDFLAGS)" -o bin/vervideos .
-	@echo "✓ Build complete: bin/vervideos"
+	@echo "Building vervids..."
+	@go build -ldflags "$(LDFLAGS)" -o bin/vervids .
+	@echo "✓ Build complete: bin/vervids"
 
 install: build
 	@echo "Installing to /usr/local/bin..."
-	@cp bin/vervideos /usr/local/bin/
-	@echo "✓ vervideos installed successfully"
+	@cp bin/vervids /usr/local/bin/
+	@echo "✓ vervids installed successfully"
 
 clean:
 	@echo "Cleaning build artifacts..."
@@ -26,5 +26,5 @@ test:
 	@go test -v ./...
 
 run: build
-	@./bin/vervideos
+	@./bin/vervids
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/ajeebtech/vervideos/internal/assets"
@@ -41,30 +42,21 @@ type Project struct {
 	ProjectPath  string    `json:"project_path"`
 	CreatedAt    time.Time `json:"created_at"`
 	Versions     []Version `json:"versions"`
-	UseDocker    bool      `json:"use_docker"`
+    UseDocker    bool      `json:"use_docker"`
 	DockerVolume string    `json:"docker_volume,omitempty"`
 }
 
-// Initialize creates a new project with the initial version
-func Initialize(aepxFilePath string, useDocker bool) (*Project, error) {
-	// Create .vervids directory structure
-	if err := storage.Initialize(); err != nil {
-		return nil, fmt.Errorf("failed to create .vervids directory: %w", err)
-	}
+// Initialize creates a new project with the initial version (Docker-only storage)
+func Initialize(aepxFilePath string) (*Project, error) {
+    // Create .vervids directory structure (local metadata)
+    if err := storage.Initialize(); err != nil {
+        return nil, fmt.Errorf("failed to create .vervids directory: %w", err)
+    }
 
-	// If using Docker, ensure container is running
-	if useDocker {
-		if !docker.IsDockerInstalled() {
-			return nil, fmt.Errorf("Docker is not installed")
-		}
-
-		if !docker.IsContainerRunning() {
-			fmt.Println("Starting Docker storage container...")
-			if err := docker.CreateContainer(); err != nil {
-				return nil, fmt.Errorf("failed to create Docker container: %w", err)
-			}
-		}
-	}
+    // Ensure Docker is ready
+    if err := docker.EnsureDockerReady(); err != nil {
+        return nil, err
+    }
 
 	// Get file info
 	fileSize, err := storage.GetFileSize(aepxFilePath)
@@ -73,12 +65,12 @@ func Initialize(aepxFilePath string, useDocker bool) (*Project, error) {
 	}
 
 	// Create project
-	proj := &Project{
+    proj := &Project{
 		ProjectName:  filepath.Base(aepxFilePath),
 		ProjectPath:  aepxFilePath,
 		CreatedAt:    time.Now(),
 		Versions:     []Version{},
-		UseDocker:    useDocker,
+        UseDocker:    true,
 		DockerVolume: docker.VolumeName,
 	}
 
@@ -100,80 +92,39 @@ func Initialize(aepxFilePath string, useDocker bool) (*Project, error) {
 		return nil, fmt.Errorf("failed to parse .aepx file: %w", err)
 	}
 
-	// Store the project file and assets
-	versionDir := fmt.Sprintf("v%03d", version.Number)
-	
-	if useDocker {
-		// Store in Docker
-		projectID := filepath.Base(filepath.Dir(aepxFilePath))
-		dockerVersionDir := filepath.Join(docker.StoragePath, projectID, versionDir)
-		
-		// Create directory in container
-		if err := docker.CreateDirectory(dockerVersionDir); err != nil {
-			return nil, fmt.Errorf("failed to create version directory in Docker: %w", err)
-		}
+    // Store the project file and assets in Docker
+    versionDir := fmt.Sprintf("v%03d", version.Number)
+    projectID := filepath.Base(filepath.Dir(aepxFilePath))
+    dockerVersionDir := filepath.Join(docker.StoragePath, projectID, versionDir)
 
-		// Copy .aepx file
-		dockerProjectPath := filepath.Join(dockerVersionDir, filepath.Base(aepxFilePath))
-		if err := docker.CopyToContainer(aepxFilePath, dockerProjectPath); err != nil {
-			return nil, fmt.Errorf("failed to copy project file to Docker: %w", err)
-		}
-		version.DockerPath = dockerProjectPath
+    if err := docker.CreateDirectory(dockerVersionDir); err != nil {
+        return nil, fmt.Errorf("failed to create version directory in Docker: %w", err)
+    }
 
-		// Copy assets
-		for _, asset := range parseResult.Assets {
-			dockerAssetPath := filepath.Join(dockerVersionDir, "assets", asset.Filename)
-			if err := docker.CopyToContainer(asset.Path, dockerAssetPath); err != nil {
-				fmt.Printf("Warning: failed to copy asset %s: %v\n", asset.Filename, err)
-				continue
-			}
-			
-			version.Assets = append(version.Assets, AssetInfo{
-				OriginalPath: asset.Path,
-				RelativePath: asset.RelativePath,
-				Filename:     asset.Filename,
-				Extension:    asset.Extension,
-				Size:         asset.Size,
-				DockerPath:   dockerAssetPath,
-			})
-		}
-	} else {
-		// Store locally
-		localVersionDir := filepath.Join(storage.GetVersionsDir(), versionDir)
-		if err := os.MkdirAll(localVersionDir, 0755); err != nil {
-			return nil, fmt.Errorf("failed to create version directory: %w", err)
-		}
+    // Copy .aepx file
+    dockerProjectPath := filepath.Join(dockerVersionDir, filepath.Base(aepxFilePath))
+    if err := docker.CopyToContainer(aepxFilePath, dockerProjectPath); err != nil {
+        return nil, fmt.Errorf("failed to copy project file to Docker: %w", err)
+    }
+    version.DockerPath = dockerProjectPath
 
-		// Copy .aepx file
-		destPath := filepath.Join(localVersionDir, filepath.Base(aepxFilePath))
-		if err := storage.CopyFile(aepxFilePath, destPath); err != nil {
-			return nil, fmt.Errorf("failed to copy file: %w", err)
-		}
-		version.FilePath = destPath
-
-		// Copy assets
-		assetsDir := filepath.Join(localVersionDir, "assets")
-		if err := os.MkdirAll(assetsDir, 0755); err != nil {
-			return nil, fmt.Errorf("failed to create assets directory: %w", err)
-		}
-
-		for _, asset := range parseResult.Assets {
-			assetDestPath := filepath.Join(assetsDir, asset.Filename)
-			if err := storage.CopyFile(asset.Path, assetDestPath); err != nil {
-				fmt.Printf("Warning: failed to copy asset %s: %v\n", asset.Filename, err)
-				continue
-			}
-			
-			version.Assets = append(version.Assets, AssetInfo{
-				OriginalPath: asset.Path,
-				RelativePath: asset.RelativePath,
-				Filename:     asset.Filename,
-				Extension:    asset.Extension,
-				Size:         asset.Size,
-				DockerPath:   assetDestPath,
-			})
-		}
-	}
+    // Copy assets
+    for _, asset := range parseResult.Assets {
+        dockerAssetPath := filepath.Join(dockerVersionDir, "assets", asset.Filename)
+        if err := docker.CopyToContainer(asset.Path, dockerAssetPath); err != nil {
+            fmt.Printf("Warning: failed to copy asset %s: %v\n", asset.Filename, err)
+            continue
+        }
+        
+        version.Assets = append(version.Assets, AssetInfo{
+            OriginalPath: asset.Path,
+            RelativePath: asset.RelativePath,
+            Filename:     asset.Filename,
+            Extension:    asset.Extension,
+            Size:         asset.Size,
+            DockerPath:   dockerAssetPath,
+        })
+    }
 
 	version.AssetCount = len(version.Assets)
 	version.TotalSize = parseResult.TotalSize
@@ -187,10 +138,14 @@ func Initialize(aepxFilePath string, useDocker bool) (*Project, error) {
 	return proj, nil
 }
 
-// Load loads the project from config.json
+// Load loads the project from config.json in current directory
 func Load() (*Project, error) {
 	configPath := storage.GetConfigPath()
+	return LoadFromPath(configPath)
+}
 
+// LoadFromPath loads a project from a specific config.json path
+func LoadFromPath(configPath string) (*Project, error) {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config: %w", err)
@@ -242,94 +197,51 @@ func (p *Project) Commit(message string) (*Version, error) {
 		TotalSize:  fileSize,
 	}
 
-	// Parse .aepx file for assets
+    // Parse .aepx file for assets
 	scriptPath := assets.GetParserScriptPath()
 	parseResult, err := assets.ParseAEPX(p.ProjectPath, scriptPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse .aepx file: %w", err)
 	}
 
-	// Store the file and assets
-	versionDir := fmt.Sprintf("v%03d", version.Number)
+    // Ensure Docker is ready
+    if err := docker.EnsureDockerReady(); err != nil {
+        return nil, err
+    }
 
-	if p.UseDocker {
-		// Ensure Docker container is running
-		if !docker.IsContainerRunning() {
-			if err := docker.StartContainer(); err != nil {
-				return nil, fmt.Errorf("failed to start Docker container: %w", err)
-			}
-		}
+    // Store the file and assets in Docker
+    versionDir := fmt.Sprintf("v%03d", version.Number)
+    projectID := filepath.Base(filepath.Dir(p.ProjectPath))
+    dockerVersionDir := filepath.Join(docker.StoragePath, projectID, versionDir)
 
-		// Store in Docker
-		projectID := filepath.Base(filepath.Dir(p.ProjectPath))
-		dockerVersionDir := filepath.Join(docker.StoragePath, projectID, versionDir)
-		
-		// Create directory in container
-		if err := docker.CreateDirectory(dockerVersionDir); err != nil {
-			return nil, fmt.Errorf("failed to create version directory in Docker: %w", err)
-		}
+    if err := docker.CreateDirectory(dockerVersionDir); err != nil {
+        return nil, fmt.Errorf("failed to create version directory in Docker: %w", err)
+    }
 
-		// Copy .aepx file
-		dockerProjectPath := filepath.Join(dockerVersionDir, filepath.Base(p.ProjectPath))
-		if err := docker.CopyToContainer(p.ProjectPath, dockerProjectPath); err != nil {
-			return nil, fmt.Errorf("failed to copy project file to Docker: %w", err)
-		}
-		version.DockerPath = dockerProjectPath
+    // Copy .aepx file
+    dockerProjectPath := filepath.Join(dockerVersionDir, filepath.Base(p.ProjectPath))
+    if err := docker.CopyToContainer(p.ProjectPath, dockerProjectPath); err != nil {
+        return nil, fmt.Errorf("failed to copy project file to Docker: %w", err)
+    }
+    version.DockerPath = dockerProjectPath
 
-		// Copy assets
-		for _, asset := range parseResult.Assets {
-			dockerAssetPath := filepath.Join(dockerVersionDir, "assets", asset.Filename)
-			if err := docker.CopyToContainer(asset.Path, dockerAssetPath); err != nil {
-				fmt.Printf("Warning: failed to copy asset %s: %v\n", asset.Filename, err)
-				continue
-			}
-			
-			version.Assets = append(version.Assets, AssetInfo{
-				OriginalPath: asset.Path,
-				RelativePath: asset.RelativePath,
-				Filename:     asset.Filename,
-				Extension:    asset.Extension,
-				Size:         asset.Size,
-				DockerPath:   dockerAssetPath,
-			})
-		}
-	} else {
-		// Store locally
-		localVersionDir := filepath.Join(storage.GetVersionsDir(), versionDir)
-		if err := os.MkdirAll(localVersionDir, 0755); err != nil {
-			return nil, fmt.Errorf("failed to create version directory: %w", err)
-		}
-
-		// Copy .aepx file
-		destPath := filepath.Join(localVersionDir, filepath.Base(p.ProjectPath))
-		if err := storage.CopyFile(p.ProjectPath, destPath); err != nil {
-			return nil, fmt.Errorf("failed to copy file: %w", err)
-		}
-		version.FilePath = destPath
-
-		// Copy assets
-		assetsDir := filepath.Join(localVersionDir, "assets")
-		if err := os.MkdirAll(assetsDir, 0755); err != nil {
-			return nil, fmt.Errorf("failed to create assets directory: %w", err)
-		}
-
-		for _, asset := range parseResult.Assets {
-			assetDestPath := filepath.Join(assetsDir, asset.Filename)
-			if err := storage.CopyFile(asset.Path, assetDestPath); err != nil {
-				fmt.Printf("Warning: failed to copy asset %s: %v\n", asset.Filename, err)
-				continue
-			}
-			
-			version.Assets = append(version.Assets, AssetInfo{
-				OriginalPath: asset.Path,
-				RelativePath: asset.RelativePath,
-				Filename:     asset.Filename,
-				Extension:    asset.Extension,
-				Size:         asset.Size,
-				DockerPath:   assetDestPath,
-			})
-		}
-	}
+    // Copy assets
+    for _, asset := range parseResult.Assets {
+        dockerAssetPath := filepath.Join(dockerVersionDir, "assets", asset.Filename)
+        if err := docker.CopyToContainer(asset.Path, dockerAssetPath); err != nil {
+            fmt.Printf("Warning: failed to copy asset %s: %v\n", asset.Filename, err)
+            continue
+        }
+        
+        version.Assets = append(version.Assets, AssetInfo{
+            OriginalPath: asset.Path,
+            RelativePath: asset.RelativePath,
+            Filename:     asset.Filename,
+            Extension:    asset.Extension,
+            Size:         asset.Size,
+            DockerPath:   dockerAssetPath,
+        })
+    }
 
 	version.AssetCount = len(version.Assets)
 	version.TotalSize = parseResult.TotalSize
@@ -359,5 +271,139 @@ func (p *Project) GetLatestVersion() *Version {
 		return nil
 	}
 	return &p.Versions[len(p.Versions)-1]
+}
+
+// ProjectInfo represents basic info about a project found in Docker
+type ProjectInfo struct {
+	Name       string
+	DockerPath string
+}
+
+// GetAllProjects scans Docker storage and returns all projects
+func GetAllProjects() ([]ProjectInfo, error) {
+	if err := docker.EnsureDockerReady(); err != nil {
+		return nil, err
+	}
+
+	// List all directories that contain version folders (v000, v001, etc.)
+	// This finds actual projects, not just top-level folders
+	output, err := docker.ExecInContainer("sh", "-c", fmt.Sprintf(
+		"find %s -type d -name 'v[0-9][0-9][0-9]' -mindepth 2 -maxdepth 2 | sed 's|/v[0-9][0-9][0-9]$||' | sort -u",
+		docker.StoragePath))
+	if err != nil {
+		return []ProjectInfo{}, nil // No projects found, return empty
+	}
+
+	var projects []ProjectInfo
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	seen := make(map[string]bool)
+	
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// Get the project directory (the parent of the version folder)
+		projectPath := line
+		// Extract project name: could be direct child of /vervids or nested
+		relPath := strings.TrimPrefix(projectPath, docker.StoragePath+"/")
+		parts := strings.Split(relPath, "/")
+		var projectName string
+		if len(parts) == 1 {
+			projectName = parts[0]
+		} else {
+			// Use the last part as project name
+			projectName = parts[len(parts)-1]
+		}
+		
+		// Use full path as unique key to avoid duplicates
+		if projectName != "" && !seen[projectPath] {
+			seen[projectPath] = true
+			projects = append(projects, ProjectInfo{
+				Name:       projectName,
+				DockerPath: projectPath,
+			})
+		}
+	}
+
+	return projects, nil
+}
+
+// FindProjectConfig searches for a config.json file that matches a project name
+func FindProjectConfig(projectName string) (string, error) {
+	// Search common locations for projects with this name
+	// This is a simple approach - look in current directory and parent
+	searchPaths := []string{
+		".",
+		filepath.Dir("."),
+	}
+
+	for _, searchPath := range searchPaths {
+		configPath := filepath.Join(searchPath, storage.VerVidsDir, storage.ConfigFile)
+		if _, err := os.Stat(configPath); err == nil {
+			// Check if this config matches the project name
+			data, err := os.ReadFile(configPath)
+			if err != nil {
+				continue
+			}
+			var proj Project
+			if err := json.Unmarshal(data, &proj); err != nil {
+				continue
+			}
+			// Match if project directory name matches
+			configDir := filepath.Base(filepath.Dir(filepath.Dir(configPath)))
+			if configDir == projectName || strings.Contains(proj.ProjectName, projectName) {
+				return configPath, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("config not found for project: %s", projectName)
+}
+
+// RemoveVersion removes a version by number from the project and compacts the slice.
+func (p *Project) RemoveVersion(number int) error {
+    if number < 0 || number >= len(p.Versions) {
+        return fmt.Errorf("version %d does not exist", number)
+    }
+    // Remove without re-numbering historical versions (keep numbers stable)
+    filtered := make([]Version, 0, len(p.Versions))
+    for _, v := range p.Versions {
+        if v.Number != number {
+            filtered = append(filtered, v)
+        }
+    }
+    p.Versions = filtered
+    return p.Save()
+}
+
+// PruneMissingDockerVersions removes versions whose Docker-backed files are missing.
+// Returns the number of versions removed.
+func (p *Project) PruneMissingDockerVersions() (int, error) {
+    // Ensure Docker ready (in case we need to exec)
+    if err := docker.EnsureDockerReady(); err != nil {
+        return 0, err
+    }
+    removed := 0
+    kept := make([]Version, 0, len(p.Versions))
+    for _, v := range p.Versions {
+        if v.DockerPath == "" {
+            // If no docker path recorded, keep (legacy/local); or drop? choose keep
+            kept = append(kept, v)
+            continue
+        }
+        if docker.PathExistsInContainer(v.DockerPath) {
+            kept = append(kept, v)
+            continue
+        }
+        removed++
+    }
+    if removed > 0 {
+        p.Versions = kept
+        if err := p.Save(); err != nil {
+            return removed, err
+        }
+    }
+    return removed, nil
 }
 

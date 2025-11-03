@@ -1,15 +1,19 @@
 package docker
 
 import (
-	"fmt"
-	"os/exec"
-	"strings"
+    "errors"
+    "fmt"
+    "os/exec"
+    "regexp"
+    "strconv"
+    "strings"
 )
 
 const (
-	ContainerName = "vervids-storage"
-	VolumeName    = "vervids-data"
-	StoragePath   = "/storage/projects"
+    ContainerName  = "vervids-storage"
+    VolumeName     = "vervids-data"
+    StoragePath    = "/vervids"
+    MinDockerSemver = "24.0.0"
 )
 
 // IsDockerInstalled checks if Docker is available
@@ -17,6 +21,36 @@ func IsDockerInstalled() bool {
 	cmd := exec.Command("docker", "--version")
 	err := cmd.Run()
 	return err == nil
+}
+
+func GetDockerVersion() (string, error) {
+    out, err := exec.Command("docker", "--version").CombinedOutput()
+    if err != nil {
+        return "", err
+    }
+    // Example: Docker version 24.0.7, build ...
+    re := regexp.MustCompile(`Docker version ([0-9]+)\.([0-9]+)\.([0-9]+)`)
+    m := re.FindStringSubmatch(string(out))
+    if len(m) != 4 {
+        return "", errors.New("unable to parse docker version")
+    }
+    return fmt.Sprintf("%s.%s.%s", m[1], m[2], m[3]), nil
+}
+
+func versionGTE(a, b string) bool {
+    as := strings.Split(a, ".")
+    bs := strings.Split(b, ".")
+    for i := 0; i < 3; i++ {
+        ai, _ := strconv.Atoi(as[i])
+        bi, _ := strconv.Atoi(bs[i])
+        if ai > bi {
+            return true
+        }
+        if ai < bi {
+            return false
+        }
+    }
+    return true
 }
 
 // IsContainerRunning checks if the vervids storage container is running
@@ -60,7 +94,7 @@ func CreateContainer() error {
 	cmd = exec.Command("docker", "run", "-d",
 		"--name", ContainerName,
 		"-v", fmt.Sprintf("%s:%s", VolumeName, StoragePath),
-		"alpine:latest",
+        "alpine:latest",
 		"tail", "-f", "/dev/null")
 
 	if err := cmd.Run(); err != nil {
@@ -130,5 +164,32 @@ func GetVolumeInfo() (map[string]string, error) {
 	}
 
 	return info, nil
+}
+
+// PathExistsInContainer checks if a path exists inside the container
+func PathExistsInContainer(path string) bool {
+    _, err := ExecInContainer("sh", "-lc", fmt.Sprintf("[ -e %q ]", path))
+    return err == nil
+}
+
+// EnsureDockerReady validates Docker installation, version and container state
+func EnsureDockerReady() error {
+    if !IsDockerInstalled() {
+        return fmt.Errorf("Docker is required. Please install Docker %s or newer.", MinDockerSemver)
+    }
+    v, err := GetDockerVersion()
+    if err != nil {
+        return fmt.Errorf("failed to read Docker version: %v", err)
+    }
+    if !versionGTE(v, MinDockerSemver) {
+        return fmt.Errorf("Docker %s or newer is required (found %s). Please upgrade.", MinDockerSemver, v)
+    }
+    if !IsContainerRunning() {
+        if IsContainerExists() {
+            return StartContainer()
+        }
+        return CreateContainer()
+    }
+    return nil
 }
 
