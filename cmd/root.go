@@ -110,20 +110,33 @@ Docker is required (24.0.0 or newer). Files are stored under /vervids/<projectDi
 }
 
 var commitCmd = &cobra.Command{
-	Use:   "commit [message]",
+	Use:   "commit [message] [path/to/file.aepx]",
 	Short: "Save a new version of your project",
 	Long: `Commit the current state of your .aepx file with a message.
-This creates a new version with all assets in the storage vault.
+This creates a new version with all assets in the Docker storage vault.
 
-Example: vervids commit "Added intro animation"`,
-	Args: cobra.ExactArgs(1),
+The .aepx file path must be provided - typically exported from After Effects.
+Example: vervids commit "Added intro animation" "/path/to/exported.aepx"`,
+	Args: cobra.ExactArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
 		message := args[0]
+		aepxFilePath := args[1]
 
 		// Check if initialized
 		if !storage.IsInitialized() {
 			fmt.Println("❌ Error: Not a vervids project")
 			fmt.Println("Run 'vervids init <file.aepx>' first")
+			os.Exit(1)
+		}
+
+		// Validate .aepx file
+		if _, err := os.Stat(aepxFilePath); os.IsNotExist(err) {
+			fmt.Printf("❌ Error: File '%s' does not exist\n", aepxFilePath)
+			os.Exit(1)
+		}
+
+		if filepath.Ext(aepxFilePath) != ".aepx" {
+			fmt.Printf("❌ Error: File must have .aepx extension\n")
 			os.Exit(1)
 		}
 
@@ -134,16 +147,17 @@ Example: vervids commit "Added intro animation"`,
 			os.Exit(1)
 		}
 
-		// Check if the .aepx file exists
-		if _, err := os.Stat(proj.ProjectPath); os.IsNotExist(err) {
-			fmt.Printf("❌ Error: Project file '%s' not found\n", proj.ProjectPath)
+		// Get absolute path
+		absPath, err := filepath.Abs(aepxFilePath)
+		if err != nil {
+			fmt.Printf("❌ Error: %v\n", err)
 			os.Exit(1)
 		}
 
 		fmt.Println("📦 Creating new version...")
 
-		// Create new version
-		v, err := proj.Commit(message)
+		// Create new version with the provided .aepx file
+		v, err := proj.CommitWithPath(message, absPath)
 		if err != nil {
 			fmt.Printf("❌ Error committing version: %v\n", err)
 			os.Exit(1)

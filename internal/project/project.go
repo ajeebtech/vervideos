@@ -231,13 +231,18 @@ func (p *Project) Save() error {
 	return nil
 }
 
-// Commit creates a new version of the project
+// Commit creates a new version of the project using the stored project path
 func (p *Project) Commit(message string) (*Version, error) {
+	return p.CommitWithPath(message, p.ProjectPath)
+}
+
+// CommitWithPath creates a new version of the project using the provided .aepx file path
+func (p *Project) CommitWithPath(message string, aepxFilePath string) (*Version, error) {
 	// Get next version number
 	nextVersion := len(p.Versions)
 
 	// Get current file size
-	fileSize, err := storage.GetFileSize(p.ProjectPath)
+	fileSize, err := storage.GetFileSize(aepxFilePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get file size: %w", err)
 	}
@@ -255,7 +260,7 @@ func (p *Project) Commit(message string) (*Version, error) {
 
     // Parse .aepx file for assets
 	scriptPath := assets.GetParserScriptPath()
-	parseResult, err := assets.ParseAEPX(p.ProjectPath, scriptPath)
+	parseResult, err := assets.ParseAEPX(aepxFilePath, scriptPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse .aepx file: %w", err)
 	}
@@ -268,7 +273,7 @@ func (p *Project) Commit(message string) (*Version, error) {
     // Store the file and assets in Docker
     // Use project filename (without extension) as project ID
     versionDir := fmt.Sprintf("v%03d", version.Number)
-    projectBaseName := strings.TrimSuffix(filepath.Base(p.ProjectPath), filepath.Ext(p.ProjectPath))
+    projectBaseName := strings.TrimSuffix(filepath.Base(aepxFilePath), filepath.Ext(aepxFilePath))
     projectID := sanitizeProjectName(projectBaseName)
     dockerVersionDir := filepath.Join(docker.StoragePath, projectID, versionDir)
 
@@ -277,8 +282,8 @@ func (p *Project) Commit(message string) (*Version, error) {
     }
 
     // Copy .aepx file
-    dockerProjectPath := filepath.Join(dockerVersionDir, filepath.Base(p.ProjectPath))
-    if err := docker.CopyToContainer(p.ProjectPath, dockerProjectPath); err != nil {
+    dockerProjectPath := filepath.Join(dockerVersionDir, filepath.Base(aepxFilePath))
+    if err := docker.CopyToContainer(aepxFilePath, dockerProjectPath); err != nil {
         return nil, fmt.Errorf("failed to copy project file to Docker: %w", err)
     }
     version.DockerPath = dockerProjectPath
@@ -363,6 +368,9 @@ func (p *Project) Commit(message string) (*Version, error) {
 	if err := tracking.SaveTracking(version.Number, dockerVersionDir, track); err != nil {
 		fmt.Printf("Warning: failed to save asset tracking: %v\n", err)
 	}
+
+	// Update project path to the latest committed file
+	p.ProjectPath = aepxFilePath
 
 	// Add version to project
 	p.Versions = append(p.Versions, version)
