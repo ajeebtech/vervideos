@@ -1,8 +1,8 @@
 # Dockerfile for vervids storage container
 FROM alpine:latest
 
-# Install Python for asset parsing
-RUN apk add --no-cache python3 py3-pip
+# Note: Python is no longer required - asset parsing is done natively in Go
+# Keeping minimal alpine base for storage container
 
 # Create storage directories
 RUN mkdir -p /storage/projects

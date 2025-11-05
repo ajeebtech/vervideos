@@ -52,7 +52,7 @@ vervids version
 ## 📂 How It Works
 
 ### Asset Tracking
-1. **Python Parser**: Automatically parses your `.aepx` file (XML format)
+1. **Native XML Parser**: Automatically parses your `.aepx` file (XML format) - no Python required
 2. **Asset Discovery**: Finds all referenced files (MP4, PNG, SVG, etc.)
 3. **Versioning**: Stores both the project file and all assets for each version
 
@@ -165,7 +165,7 @@ docker run --rm -v vervids-data:/data -v $(pwd):/backup alpine tar czf /backup/v
 - ✅ Automatic asset tracking (videos, images, audio, etc.)
 - ✅ Local storage option
 - ✅ Docker storage integration
-- ✅ Python-based `.aepx` parser
+- ✅ Native Go-based `.aepx` parser (no Python required)
 - ✅ JSON metadata tracking
 - ✅ Version history with messages and timestamps
 

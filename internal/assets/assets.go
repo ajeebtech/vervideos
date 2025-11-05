@@ -1,11 +1,12 @@
 package assets
 
 import (
-	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"sort"
+	"strings"
 )
 
 // Asset represents a file referenced in the .aepx project
@@ -17,7 +18,7 @@ type Asset struct {
 	Size         int64  `json:"size"`
 }
 
-// ParseResult represents the output from the Python parser
+// ParseResult represents the output from the parser
 type ParseResult struct {
 	ProjectFile   string   `json:"project_file"`
 	Assets        []Asset  `json:"assets"`
@@ -25,50 +26,158 @@ type ParseResult struct {
 	TotalSize     int64    `json:"total_size"`
 }
 
-// ParseAEPX runs the Python script to parse an .aepx file
+// ParseAEPX parses an .aepx file and extracts all asset references (native Go implementation)
 func ParseAEPX(aepxPath string, scriptPath string) (*ParseResult, error) {
-	// Run the Python parser
-	cmd := exec.Command("python3", scriptPath, aepxPath)
-	output, err := cmd.CombinedOutput()
+	// scriptPath parameter is kept for backward compatibility but not used
+	
+	result := &ParseResult{
+		ProjectFile:   "",
+		Assets:        []Asset{},
+		MissingAssets: []string{},
+		TotalSize:     0,
+	}
+
+	// Get absolute path
+	absPath, err := filepath.Abs(aepxPath)
 	if err != nil {
-		// Check if exit code is 2 (missing assets warning)
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			if exitErr.ExitCode() == 2 {
-				// Continue parsing - exit code 2 means missing assets but valid output
-			} else {
-				return nil, fmt.Errorf("failed to parse .aepx file (exit %d): %s", exitErr.ExitCode(), string(output))
+		return nil, fmt.Errorf("failed to get absolute path: %w", err)
+	}
+	result.ProjectFile = absPath
+
+	// Open and read the XML file
+	file, err := os.Open(aepxPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open file: %w", err)
+	}
+	defer file.Close()
+
+	// Parse XML using decoder to handle large files efficiently
+	decoder := xml.NewDecoder(file)
+	assetPaths := make(map[string]bool) // Use map to avoid duplicates
+
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			break // End of file or error
+		}
+
+		switch se := token.(type) {
+		case xml.StartElement:
+			// Check local name (handles namespaced elements)
+			localName := se.Name.Local
+			
+			// Method 1: Look for fileReference elements with fullpath attribute (most common in .aepx)
+			// This handles both namespaced and non-namespaced elements
+			if localName == "fileReference" {
+				for _, attr := range se.Attr {
+					// Check both namespaced and non-namespaced attributes
+					if attr.Name.Local == "fullpath" && attr.Value != "" {
+						path := strings.TrimSpace(attr.Value)
+						if path != "" {
+							assetPaths[path] = true
+						}
+					}
+				}
 			}
+
+			// Method 2: Look for fullpath elements (text content)
+			if localName == "fullpath" {
+				var elem struct {
+					Text string `xml:",chardata"`
+				}
+				if err := decoder.DecodeElement(&elem, &se); err == nil {
+					if elem.Text != "" {
+						path := strings.TrimSpace(elem.Text)
+						if path != "" {
+							assetPaths[path] = true
+						}
+					}
+				}
+			}
+
+			// Method 3: Look for file/path/src/source elements
+			if localName == "file" || localName == "path" || 
+			   localName == "src" || localName == "source" {
+				var elem struct {
+					Text string `xml:",chardata"`
+				}
+				if err := decoder.DecodeElement(&elem, &se); err == nil {
+					if elem.Text != "" {
+						path := strings.TrimSpace(elem.Text)
+						if path != "" {
+							assetPaths[path] = true
+						}
+					}
+				}
+				// Also check attributes
+				for _, attr := range se.Attr {
+					if strings.Contains(strings.ToLower(attr.Name.Local), "path") ||
+					   strings.Contains(strings.ToLower(attr.Name.Local), "file") {
+						path := strings.TrimSpace(attr.Value)
+						if path != "" {
+							assetPaths[path] = true
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Process each asset path
+	projectDir := filepath.Dir(absPath)
+	
+	for assetPath := range assetPaths {
+		if assetPath == "" {
+			continue
+		}
+
+		// Skip URLs
+		if strings.HasPrefix(assetPath, "http://") || 
+		   strings.HasPrefix(assetPath, "https://") || 
+		   strings.HasPrefix(assetPath, "file://") {
+			continue
+		}
+
+		// Convert to absolute path if relative
+		if !filepath.IsAbs(assetPath) {
+			assetPath = filepath.Join(projectDir, assetPath)
+		}
+
+		// Normalize the path
+		assetPath = filepath.Clean(assetPath)
+
+		// Check if file exists
+		info, err := os.Stat(assetPath)
+		if err == nil && !info.IsDir() {
+			// File exists
+			relPath, _ := filepath.Rel(projectDir, assetPath)
+			ext := filepath.Ext(assetPath)
+			
+			result.Assets = append(result.Assets, Asset{
+				Path:         assetPath,
+				RelativePath: relPath,
+				Filename:     filepath.Base(assetPath),
+				Extension:    ext,
+				Size:         info.Size(),
+			})
+			result.TotalSize += info.Size()
 		} else {
-			return nil, fmt.Errorf("failed to run parser: %w - output: %s", err, string(output))
+			// File missing
+			result.MissingAssets = append(result.MissingAssets, assetPath)
 		}
 	}
 
-	// Parse JSON output
-	var result ParseResult
-	if err := json.Unmarshal(output, &result); err != nil {
-		return nil, fmt.Errorf("failed to parse JSON output: %w (output was: %s)", err, string(output))
-	}
+	// Sort for consistency
+	sort.Slice(result.Assets, func(i, j int) bool {
+		return result.Assets[i].Path < result.Assets[j].Path
+	})
+	sort.Strings(result.MissingAssets)
 
-	return &result, nil
+	return result, nil
 }
 
-// GetParserScriptPath returns the path to the Python parser script
+// GetParserScriptPath is kept for backward compatibility but no longer needed
+// Returns empty string since we no longer use Python scripts
 func GetParserScriptPath() string {
-	// Try to find the script in common locations
-	possiblePaths := []string{
-		"scripts/parse_aepx.py",                                    // Relative to current dir
-		"/Users/jatin/Documents/vervideos/scripts/parse_aepx.py",  // Absolute path (dev)
-		"/usr/local/share/vervids/scripts/parse_aepx.py",          // Installed location
-	}
-	
-	for _, path := range possiblePaths {
-		absPath, _ := filepath.Abs(path)
-		if _, err := os.Stat(absPath); err == nil {
-			return absPath
-		}
-	}
-	
-	// If none found, return absolute dev path as default
-	return "/Users/jatin/Documents/vervideos/scripts/parse_aepx.py"
+	return ""
 }
-

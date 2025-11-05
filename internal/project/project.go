@@ -87,8 +87,7 @@ func Initialize(aepxFilePath string) (*Project, error) {
 	}
 
 	// Parse .aepx file for assets
-	scriptPath := assets.GetParserScriptPath()
-	parseResult, err := assets.ParseAEPX(aepxFilePath, scriptPath)
+	parseResult, err := assets.ParseAEPX(aepxFilePath, "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse .aepx file: %w", err)
 	}
@@ -405,8 +404,7 @@ func (p *Project) CommitWithPath(message string, aepxFilePath string) (*Version,
 	}
 
     // Parse .aepx file for assets
-	scriptPath := assets.GetParserScriptPath()
-	parseResult, err := assets.ParseAEPX(aepxFilePath, scriptPath)
+	parseResult, err := assets.ParseAEPX(aepxFilePath, "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse .aepx file: %w", err)
 	}
