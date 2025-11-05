@@ -45,10 +45,14 @@ var initCmd = &cobra.Command{
 	Short: "Initialize version control for an After Effects project",
     Long: `Initialize version control for an .aepx file. This creates a local .vervids config and stores the initial version in Docker.
 
-Docker is required (24.0.0 or newer). Files are stored under /vervids/<projectDir>/vXXX/ in the Docker volume.`,
+Docker is required (24.0.0 or newer). Files are stored under /vervids/<projectDir>/vXXX/ in the Docker volume.
+
+If a .vervids directory exists for a different project file, it will be automatically removed.
+Use --force to re-initialize the same project file (this will delete existing version history).`,
 	Args: cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		aepxFilePath := args[0]
+		force, _ := cmd.Flags().GetBool("force")
 
 		// Check if file exists
 		if _, err := os.Stat(aepxFilePath); os.IsNotExist(err) {
@@ -63,18 +67,52 @@ Docker is required (24.0.0 or newer). Files are stored under /vervids/<projectDi
 			os.Exit(1)
 		}
 
-		// Check if already initialized
-		if storage.IsInitialized() {
-			fmt.Println("❌ Error: Project already initialized (.vervids directory exists)")
-			fmt.Println("Use 'vervids commit' to save new versions")
-			os.Exit(1)
-		}
-
-		// Initialize project
+		// Get absolute path for comparison
 		absPath, err := filepath.Abs(aepxFilePath)
 		if err != nil {
 			fmt.Printf("❌ Error: %v\n", err)
 			os.Exit(1)
+		}
+
+		// Check if already initialized
+		if storage.IsInitialized() {
+			// Try to load existing project to see if it's for the same file
+			existingProj, err := project.Load()
+			if err == nil && existingProj != nil {
+				// Normalize paths for comparison
+				existingPath := existingProj.ProjectPath
+				if existingPath == absPath {
+					// Same file - user should use commit
+					if !force {
+						fmt.Println("❌ Error: This project file is already initialized")
+						fmt.Printf("  Existing project: %s\n", existingProj.ProjectName)
+						fmt.Println("  Use 'vervids commit \"message\" <file.aepx>' to save new versions")
+						fmt.Println("  Or use 'vervids delete <project-name>' to delete the project and start fresh")
+						os.Exit(1)
+					}
+				} else {
+					// Different file - automatically remove old project
+					fmt.Println("⚠️  Found existing project for a different file")
+					fmt.Printf("  Existing: %s\n", existingProj.ProjectName)
+					fmt.Printf("  New:      %s\n", filepath.Base(absPath))
+					fmt.Println("  Removing old project to initialize new one...")
+				}
+			} else {
+				// Can't load existing project - might be corrupted or incomplete
+				if !force {
+					fmt.Println("⚠️  Found .vervids directory but couldn't load project")
+					fmt.Println("  Removing it to start fresh...")
+				} else {
+					fmt.Println("⚠️  Force flag detected: removing existing .vervids directory...")
+				}
+			}
+			
+			// Remove existing .vervids directory
+			if err := os.RemoveAll(storage.VerVidsDir); err != nil {
+				fmt.Printf("❌ Error removing existing .vervids directory: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println("✓ Removed existing .vervids directory")
 		}
 
         if err := docker.EnsureDockerReady(); err != nil {
@@ -235,6 +273,7 @@ Example:
 
 func init() {
 	rootCmd.AddCommand(versionCmd)
+	initCmd.Flags().BoolP("force", "f", false, "Force re-initialization of the same project file (removes existing version history)")
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(commitCmd)
 	rootCmd.AddCommand(listCmd)
@@ -495,6 +534,7 @@ Example:
 		fmt.Println("✓ Project deleted successfully")
 		fmt.Println("  • All versions removed from Docker")
 		fmt.Println("  • All assets removed from Docker")
+		fmt.Println("  • Local .vervids directory removed (if found)")
 	},
 }
 

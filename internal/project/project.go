@@ -280,6 +280,100 @@ func DeleteProjectByName(projectName string, dockerPath string) error {
 		return fmt.Errorf("failed to delete project from Docker: %w", err)
 	}
 
+	// Also delete local .vervids directory if it exists for this project
+	// Extract project ID from docker path to match with config
+	relPath := strings.TrimPrefix(dockerPath, docker.StoragePath+"/")
+	parts := strings.Split(relPath, "/")
+	dockerProjectID := parts[len(parts)-1]
+
+	// First, check current directory (most common case)
+	currentDir, _ := os.Getwd()
+	currentConfigPath := filepath.Join(currentDir, storage.VerVidsDir, storage.ConfigFile)
+	if _, err := os.Stat(currentConfigPath); err == nil {
+		if data, err := os.ReadFile(currentConfigPath); err == nil {
+			var proj Project
+			if json.Unmarshal(data, &proj) == nil {
+				configProjectID := sanitizeProjectName(strings.TrimSuffix(proj.ProjectName, filepath.Ext(proj.ProjectName)))
+				// Match by project ID or project name
+				if configProjectID == dockerProjectID || 
+				   strings.EqualFold(strings.TrimSuffix(proj.ProjectName, filepath.Ext(proj.ProjectName)), strings.TrimSuffix(projectName, filepath.Ext(projectName))) ||
+				   strings.Contains(strings.ToLower(proj.ProjectName), strings.ToLower(projectName)) {
+					// Found matching config, delete the .vervids directory
+					vervidsDir := filepath.Join(currentDir, storage.VerVidsDir)
+					if err := os.RemoveAll(vervidsDir); err != nil {
+						fmt.Printf("Warning: failed to delete local .vervids directory at %s: %v\n", vervidsDir, err)
+					} else {
+						fmt.Printf("✓ Deleted local .vervids directory\n")
+					}
+					return nil
+				}
+			}
+		}
+	}
+
+	// Also search other common locations
+	home := os.Getenv("HOME")
+	searchDirs := []string{
+		filepath.Join(home, "Documents"),
+		filepath.Join(home, "Desktop"),
+		filepath.Join(home, "Projects"),
+	}
+
+	for _, baseDir := range searchDirs {
+		if entries, err := os.ReadDir(baseDir); err == nil {
+			for _, entry := range entries {
+				if entry.IsDir() {
+					configPath := filepath.Join(baseDir, entry.Name(), storage.VerVidsDir, storage.ConfigFile)
+					if _, err := os.Stat(configPath); err == nil {
+						// Read and check if this config matches the project being deleted
+						if data, err := os.ReadFile(configPath); err == nil {
+							var proj Project
+							if json.Unmarshal(data, &proj) == nil {
+								// Check if this config's project matches
+								configProjectID := sanitizeProjectName(strings.TrimSuffix(proj.ProjectName, filepath.Ext(proj.ProjectName)))
+								// Match by project ID or project name
+								if configProjectID == dockerProjectID || 
+								   strings.EqualFold(strings.TrimSuffix(proj.ProjectName, filepath.Ext(proj.ProjectName)), strings.TrimSuffix(projectName, filepath.Ext(projectName))) ||
+								   strings.Contains(strings.ToLower(proj.ProjectName), strings.ToLower(projectName)) {
+									// Found matching config, delete the .vervids directory
+									vervidsDir := filepath.Join(baseDir, entry.Name(), storage.VerVidsDir)
+									if err := os.RemoveAll(vervidsDir); err != nil {
+										fmt.Printf("Warning: failed to delete local .vervids directory at %s: %v\n", vervidsDir, err)
+									} else {
+										fmt.Printf("✓ Deleted local .vervids directory\n")
+									}
+									return nil
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		// Also check if .vervids exists directly in baseDir
+		configPath := filepath.Join(baseDir, storage.VerVidsDir, storage.ConfigFile)
+		if _, err := os.Stat(configPath); err == nil {
+			if data, err := os.ReadFile(configPath); err == nil {
+				var proj Project
+				if json.Unmarshal(data, &proj) == nil {
+					configProjectID := sanitizeProjectName(strings.TrimSuffix(proj.ProjectName, filepath.Ext(proj.ProjectName)))
+					if configProjectID == dockerProjectID || 
+					   strings.EqualFold(strings.TrimSuffix(proj.ProjectName, filepath.Ext(proj.ProjectName)), strings.TrimSuffix(projectName, filepath.Ext(projectName))) ||
+					   strings.Contains(strings.ToLower(proj.ProjectName), strings.ToLower(projectName)) {
+						vervidsDir := filepath.Join(baseDir, storage.VerVidsDir)
+						if err := os.RemoveAll(vervidsDir); err != nil {
+							fmt.Printf("Warning: failed to delete local .vervids directory at %s: %v\n", vervidsDir, err)
+						} else {
+							fmt.Printf("✓ Deleted local .vervids directory\n")
+						}
+						return nil
+					}
+				}
+			}
+		}
+	}
+
+	// No local .vervids found, but Docker deletion succeeded, so return success
 	return nil
 }
 

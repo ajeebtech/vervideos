@@ -42,12 +42,22 @@ def parse_aepx(aepx_path: str) -> Dict:
     # Look for file references in various elements
     # After Effects stores file paths in different elements depending on the asset type
     
-    # Method 1: Look for <fullpath> elements
+    # Method 1: Look for <fileReference> elements with fullpath attribute (most common in .aepx)
+    # Handle both namespaced and non-namespaced elements
+    for file_ref in root.iter():
+        # Check if this is a fileReference element (with or without namespace)
+        if file_ref.tag.endswith('fileReference') or 'fileReference' in file_ref.tag:
+            if 'fullpath' in file_ref.attrib:
+                fullpath = file_ref.attrib['fullpath']
+                if fullpath and fullpath.strip():
+                    asset_paths.add(fullpath.strip())
+    
+    # Method 2: Look for <fullpath> elements (text content)
     for fullpath in root.iter('fullpath'):
         if fullpath.text:
             asset_paths.add(fullpath.text)
     
-    # Method 2: Look for file paths in specific asset elements
+    # Method 3: Look for file paths in specific asset elements
     for elem in root.iter():
         # Check for 'file' attributes or text content that looks like paths
         if elem.tag in ['file', 'path', 'src', 'source']:
