@@ -416,31 +416,54 @@ var pruneCmd = &cobra.Command{
 }
 
 var deleteCmd = &cobra.Command{
-	Use:   "delete",
-	Short: "Delete the current project and all its data",
-	Long: `Delete removes the project from Docker storage (including all versions and assets) 
-and deletes the local .vervids directory.
+	Use:   "delete <project-name>",
+	Short: "Delete a project and all its data",
+	Long: `Delete removes the project from Docker storage (including all versions and assets).
 
-⚠️  WARNING: This action cannot be undone! All versions, assets, and project history will be permanently deleted.`,
-	Args: cobra.NoArgs,
+⚠️  WARNING: This action cannot be undone! All versions, assets, and project history will be permanently deleted.
+
+Example:
+  vervids delete myproject`,
+	Args: cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		// Check if initialized
-		if !storage.IsInitialized() {
-			fmt.Println("❌ Error: Not a vervids project")
-			fmt.Println("Run 'vervids init <file.aepx>' first")
+		projectName := args[0]
+
+		// Ensure Docker is ready
+		if err := docker.EnsureDockerReady(); err != nil {
+			fmt.Printf("❌ %v\n", err)
 			os.Exit(1)
 		}
 
-		// Load project
-		proj, err := project.Load()
+		// Get all projects to find the one to delete
+		projects, err := project.GetAllProjects()
 		if err != nil {
-			fmt.Printf("❌ Error loading project: %v\n", err)
+			fmt.Printf("❌ Error getting projects: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Find project by name (case-insensitive partial match)
+		var targetProject *project.ProjectInfo
+		for i, p := range projects {
+			// Exact match or partial match
+			if strings.EqualFold(p.Name, projectName) || 
+			   strings.Contains(strings.ToLower(p.Name), strings.ToLower(projectName)) {
+				targetProject = &projects[i]
+				break
+			}
+		}
+
+		if targetProject == nil {
+			fmt.Printf("❌ Error: Project '%s' not found\n", projectName)
+			fmt.Println("\nAvailable projects:")
+			for _, p := range projects {
+				fmt.Printf("  • %s\n", p.Name)
+			}
 			os.Exit(1)
 		}
 
 		// Show project info
-		fmt.Printf("Project: %s\n", proj.ProjectName)
-		fmt.Printf("Versions: %d\n", len(proj.Versions))
+		fmt.Printf("Project: %s\n", targetProject.Name)
+		fmt.Printf("Path: %s\n", targetProject.DockerPath)
 		fmt.Println()
 
 		// Confirmation prompt
@@ -464,7 +487,7 @@ and deletes the local .vervids directory.
 		fmt.Println()
 		fmt.Println("🗑️  Deleting project...")
 		
-		if err := proj.Delete(); err != nil {
+		if err := project.DeleteProjectByName(targetProject.Name, targetProject.DockerPath); err != nil {
 			fmt.Printf("❌ Error deleting project: %v\n", err)
 			os.Exit(1)
 		}
@@ -472,7 +495,6 @@ and deletes the local .vervids directory.
 		fmt.Println("✓ Project deleted successfully")
 		fmt.Println("  • All versions removed from Docker")
 		fmt.Println("  • All assets removed from Docker")
-		fmt.Println("  • Local .vervids directory removed")
 	},
 }
 

@@ -264,6 +264,25 @@ func (p *Project) Delete() error {
 	return nil
 }
 
+// DeleteProjectByName deletes a project by its name and Docker path
+func DeleteProjectByName(projectName string, dockerPath string) error {
+	// Ensure Docker is ready
+	if err := docker.EnsureDockerReady(); err != nil {
+		return fmt.Errorf("Docker not available: %w", err)
+	}
+
+	// Delete project directory from Docker (includes all versions and assets)
+	if !docker.PathExistsInContainer(dockerPath) {
+		return fmt.Errorf("project directory not found in Docker: %s", dockerPath)
+	}
+
+	if err := docker.DeleteDirectory(dockerPath); err != nil {
+		return fmt.Errorf("failed to delete project from Docker: %w", err)
+	}
+
+	return nil
+}
+
 // Commit creates a new version of the project using the stored project path
 func (p *Project) Commit(message string) (*Version, error) {
 	return p.CommitWithPath(message, p.ProjectPath)
