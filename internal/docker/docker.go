@@ -7,6 +7,7 @@ import (
     "regexp"
     "strconv"
     "strings"
+    "time"
 )
 
 const (
@@ -21,6 +22,36 @@ func IsDockerInstalled() bool {
 	cmd := exec.Command("docker", "--version")
 	err := cmd.Run()
 	return err == nil
+}
+
+// IsDockerDaemonRunning checks if Docker daemon is accessible
+func IsDockerDaemonRunning() bool {
+	cmd := exec.Command("docker", "info")
+	cmd.Stderr = nil // Suppress stderr
+	err := cmd.Run()
+	return err == nil
+}
+
+// StartDockerDesktop starts Docker Desktop (macOS)
+func StartDockerDesktop() error {
+	// Try to start Docker Desktop on macOS
+	cmd := exec.Command("open", "-a", "Docker")
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to start Docker Desktop: %w", err)
+	}
+	return nil
+}
+
+// WaitForDocker waits for Docker daemon to become available (with timeout)
+func WaitForDocker(maxWaitSeconds int) error {
+	for i := 0; i < maxWaitSeconds; i++ {
+		if IsDockerDaemonRunning() {
+			return nil
+		}
+		// Wait 1 second before checking again
+		time.Sleep(1 * time.Second)
+	}
+	return fmt.Errorf("Docker daemon did not become available within %d seconds", maxWaitSeconds)
 }
 
 func GetDockerVersion() (string, error) {
@@ -73,6 +104,15 @@ func IsContainerExists() bool {
 	return strings.TrimSpace(string(output)) == ContainerName
 }
 
+// IsVolumeExists checks if the Docker volume exists
+func IsVolumeExists() bool {
+	cmd := exec.Command("docker", "volume", "inspect", VolumeName)
+	// Suppress stderr to avoid printing errors if volume doesn't exist
+	cmd.Stderr = nil
+	err := cmd.Run()
+	return err == nil
+}
+
 // CreateContainer creates and starts the storage container
 func CreateContainer() error {
 	// Check if container already exists
@@ -84,14 +124,21 @@ func CreateContainer() error {
 		return nil
 	}
 
-	// Create volume if it doesn't exist
-	cmd := exec.Command("docker", "volume", "create", VolumeName)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to create volume: %w", err)
+	// Create volume (ignore error if it already exists)
+	volumeCmd := exec.Command("docker", "volume", "create", VolumeName)
+	output, err := volumeCmd.CombinedOutput()
+	if err != nil {
+		// Check if error is because volume already exists
+		outputStr := strings.ToLower(string(output))
+		if strings.Contains(outputStr, "already exists") {
+			// Volume exists, that's fine - continue
+		} else {
+			return fmt.Errorf("failed to create volume: %w (output: %s)", err, string(output))
+		}
 	}
 
 	// Run container
-	cmd = exec.Command("docker", "run", "-d",
+	cmd := exec.Command("docker", "run", "-d",
 		"--name", ContainerName,
 		"-v", fmt.Sprintf("%s:%s", VolumeName, StoragePath),
         "alpine:latest",
@@ -172,11 +219,35 @@ func PathExistsInContainer(path string) bool {
     return err == nil
 }
 
+// DeleteDirectory deletes a directory and all its contents recursively inside the container
+func DeleteDirectory(path string) error {
+    _, err := ExecInContainer("rm", "-rf", path)
+    return err
+}
+
 // EnsureDockerReady validates Docker installation, version and container state
+// It will automatically start Docker Desktop if needed (macOS)
 func EnsureDockerReady() error {
     if !IsDockerInstalled() {
         return fmt.Errorf("Docker is required. Please install Docker %s or newer.", MinDockerSemver)
     }
+    
+    // Check if Docker daemon is running
+    if !IsDockerDaemonRunning() {
+        // Try to start Docker Desktop automatically (macOS)
+        fmt.Println("🐳 Docker is not running. Starting Docker Desktop...")
+        if err := StartDockerDesktop(); err != nil {
+            return fmt.Errorf("Docker is not running. Please start Docker Desktop manually: %w", err)
+        }
+        
+        // Wait for Docker to become available (max 30 seconds)
+        fmt.Println("⏳ Waiting for Docker to start...")
+        if err := WaitForDocker(30); err != nil {
+            return fmt.Errorf("Docker did not start in time. Please ensure Docker Desktop is running: %w", err)
+        }
+        fmt.Println("✓ Docker is ready")
+    }
+    
     v, err := GetDockerVersion()
     if err != nil {
         return fmt.Errorf("failed to read Docker version: %v", err)

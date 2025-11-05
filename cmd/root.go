@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -239,6 +240,7 @@ func init() {
 	rootCmd.AddCommand(listCmd)
 	rootCmd.AddCommand(showCmd)
 	rootCmd.AddCommand(pruneCmd)
+	rootCmd.AddCommand(deleteCmd)
 }
 
 func Execute() error {
@@ -411,6 +413,67 @@ var pruneCmd = &cobra.Command{
             fmt.Printf("✓ Pruned %d missing version(s)\n", removed)
         }
     },
+}
+
+var deleteCmd = &cobra.Command{
+	Use:   "delete",
+	Short: "Delete the current project and all its data",
+	Long: `Delete removes the project from Docker storage (including all versions and assets) 
+and deletes the local .vervids directory.
+
+⚠️  WARNING: This action cannot be undone! All versions, assets, and project history will be permanently deleted.`,
+	Args: cobra.NoArgs,
+	Run: func(cmd *cobra.Command, args []string) {
+		// Check if initialized
+		if !storage.IsInitialized() {
+			fmt.Println("❌ Error: Not a vervids project")
+			fmt.Println("Run 'vervids init <file.aepx>' first")
+			os.Exit(1)
+		}
+
+		// Load project
+		proj, err := project.Load()
+		if err != nil {
+			fmt.Printf("❌ Error loading project: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Show project info
+		fmt.Printf("Project: %s\n", proj.ProjectName)
+		fmt.Printf("Versions: %d\n", len(proj.Versions))
+		fmt.Println()
+
+		// Confirmation prompt
+		fmt.Print("⚠️  WARNING: This will permanently delete all project data!\n")
+		fmt.Print("Type 'DELETE' to confirm: ")
+		
+		reader := bufio.NewReader(os.Stdin)
+		confirmation, err := reader.ReadString('\n')
+		if err != nil {
+			fmt.Printf("❌ Error reading input: %v\n", err)
+			os.Exit(1)
+		}
+
+		confirmation = strings.TrimSpace(confirmation)
+		if confirmation != "DELETE" {
+			fmt.Println("❌ Deletion cancelled (confirmation did not match)")
+			os.Exit(1)
+		}
+
+		// Delete project
+		fmt.Println()
+		fmt.Println("🗑️  Deleting project...")
+		
+		if err := proj.Delete(); err != nil {
+			fmt.Printf("❌ Error deleting project: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Println("✓ Project deleted successfully")
+		fmt.Println("  • All versions removed from Docker")
+		fmt.Println("  • All assets removed from Docker")
+		fmt.Println("  • Local .vervids directory removed")
+	},
 }
 
 

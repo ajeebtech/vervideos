@@ -231,6 +231,39 @@ func (p *Project) Save() error {
 	return nil
 }
 
+// Delete removes the project from Docker storage and local filesystem
+func (p *Project) Delete() error {
+	// Ensure Docker is ready
+	if err := docker.EnsureDockerReady(); err != nil {
+		return fmt.Errorf("Docker not available: %w", err)
+	}
+
+	// Get project ID from project name (same logic as Initialize/Commit)
+	projectBaseName := strings.TrimSuffix(filepath.Base(p.ProjectPath), filepath.Ext(p.ProjectPath))
+	projectID := sanitizeProjectName(projectBaseName)
+	dockerProjectDir := filepath.Join(docker.StoragePath, projectID)
+
+	// Check if project directory exists in Docker
+	if !docker.PathExistsInContainer(dockerProjectDir) {
+		// Project doesn't exist in Docker, but continue to delete local files
+	} else {
+		// Delete project directory from Docker (includes all versions and assets)
+		if err := docker.DeleteDirectory(dockerProjectDir); err != nil {
+			return fmt.Errorf("failed to delete project from Docker: %w", err)
+		}
+	}
+
+	// Delete local .vervids directory
+	vervidsDir := storage.VerVidsDir
+	if _, err := os.Stat(vervidsDir); err == nil {
+		if err := os.RemoveAll(vervidsDir); err != nil {
+			return fmt.Errorf("failed to delete local .vervids directory: %w", err)
+		}
+	}
+
+	return nil
+}
+
 // Commit creates a new version of the project using the stored project path
 func (p *Project) Commit(message string) (*Version, error) {
 	return p.CommitWithPath(message, p.ProjectPath)
