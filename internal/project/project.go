@@ -12,6 +12,7 @@ import (
 	"github.com/ajeebtech/vervideos/internal/docker"
 	"github.com/ajeebtech/vervideos/internal/storage"
 	"github.com/ajeebtech/vervideos/internal/tracking"
+	"github.com/ajeebtech/vervideos/internal/ui"
 )
 
 // AssetInfo represents an asset file tracked in a version
@@ -125,12 +126,12 @@ func Initialize(aepxFilePath string) (*Project, error) {
         if !docker.PathExistsInContainer(sharedAssetPath) {
             // Copy new asset to shared pool
             if err := docker.CopyToContainer(asset.Path, sharedAssetPath); err != nil {
-                fmt.Printf("Warning: failed to copy asset %s: %v\n", asset.Filename, err)
+                fmt.Println(ui.Warning(fmt.Sprintf("Failed to copy asset %s: %v", asset.Filename, err)))
                 continue
             }
-            fmt.Printf("✓ Copied new asset: %s\n", asset.Filename)
+            fmt.Println(ui.Success(fmt.Sprintf("Copied new asset: %s", asset.Filename)))
         } else {
-            fmt.Printf("✓ Reusing existing asset: %s\n", asset.Filename)
+            fmt.Println(ui.Success(fmt.Sprintf("Reusing existing asset: %s", asset.Filename)))
         }
         
         // Reference shared asset (not version-specific)
@@ -161,7 +162,7 @@ func Initialize(aepxFilePath string) (*Project, error) {
 	// Create asset tracking for initial version (no previous version to compare)
 	track := tracking.CreateTracking(version.Number, version.Message, currentAssetsInput, []tracking.AssetInfoInput{})
 	if err := tracking.SaveTracking(version.Number, dockerVersionDir, track); err != nil {
-		fmt.Printf("Warning: failed to save asset tracking: %v\n", err)
+		fmt.Println(ui.Warning(fmt.Sprintf("Failed to save asset tracking: %v", err)))
 	}
 
 	proj.Versions = append(proj.Versions, version)
@@ -300,9 +301,9 @@ func DeleteProjectByName(projectName string, dockerPath string) error {
 					// Found matching config, delete the .vervids directory
 					vervidsDir := filepath.Join(currentDir, storage.VerVidsDir)
 					if err := os.RemoveAll(vervidsDir); err != nil {
-						fmt.Printf("Warning: failed to delete local .vervids directory at %s: %v\n", vervidsDir, err)
+						fmt.Println(ui.Warning(fmt.Sprintf("Failed to delete local .vervids directory at %s: %v", vervidsDir, err)))
 					} else {
-						fmt.Printf("✓ Deleted local .vervids directory\n")
+						fmt.Println(ui.Success("Deleted local .vervids directory"))
 					}
 					return nil
 				}
@@ -337,9 +338,9 @@ func DeleteProjectByName(projectName string, dockerPath string) error {
 									// Found matching config, delete the .vervids directory
 									vervidsDir := filepath.Join(baseDir, entry.Name(), storage.VerVidsDir)
 									if err := os.RemoveAll(vervidsDir); err != nil {
-										fmt.Printf("Warning: failed to delete local .vervids directory at %s: %v\n", vervidsDir, err)
+										fmt.Println(ui.Warning(fmt.Sprintf("Failed to delete local .vervids directory at %s: %v", vervidsDir, err)))
 									} else {
-										fmt.Printf("✓ Deleted local .vervids directory\n")
+										fmt.Println(ui.Success("Deleted local .vervids directory"))
 									}
 									return nil
 								}
@@ -361,9 +362,9 @@ func DeleteProjectByName(projectName string, dockerPath string) error {
 					   strings.Contains(strings.ToLower(proj.ProjectName), strings.ToLower(projectName)) {
 						vervidsDir := filepath.Join(baseDir, storage.VerVidsDir)
 						if err := os.RemoveAll(vervidsDir); err != nil {
-							fmt.Printf("Warning: failed to delete local .vervids directory at %s: %v\n", vervidsDir, err)
+							fmt.Println(ui.Warning(fmt.Sprintf("Failed to delete local .vervids directory at %s: %v", vervidsDir, err)))
 						} else {
-							fmt.Printf("✓ Deleted local .vervids directory\n")
+							fmt.Println(ui.Success("Deleted local .vervids directory"))
 						}
 						return nil
 					}
@@ -441,30 +442,44 @@ func (p *Project) CommitWithPath(message string, aepxFilePath string) (*Version,
 
     // Get all previously used assets from all previous versions
     previousAssetsMap := make(map[string]string) // filename -> docker path
+    previousAssetsSet := make(map[string]bool)   // filename -> exists in previous version
     for _, prevVersion := range p.Versions {
         for _, prevAsset := range prevVersion.Assets {
             previousAssetsMap[prevAsset.Filename] = prevAsset.DockerPath
+            previousAssetsSet[prevAsset.Filename] = true
         }
     }
 
-    // Copy only new assets, reuse existing ones
+    // Copy assets that weren't in previous version or don't exist in Docker
     for _, asset := range parseResult.Assets {
         sharedAssetPath := filepath.Join(sharedAssetsDir, asset.Filename)
         
-        // Check if asset already exists in shared pool
-        if !docker.PathExistsInContainer(sharedAssetPath) {
-            // Copy new asset to shared pool
+        // Check if this asset was in the previous version
+        wasInPreviousVersion := previousAssetsSet[asset.Filename]
+        
+        // Check if asset already exists in Docker
+        existsInDocker := docker.PathExistsInContainer(sharedAssetPath)
+        
+        // Copy asset if:
+        // 1. It wasn't in the previous version (new asset), OR
+        // 2. It doesn't exist in Docker (missing or was deleted)
+        if !wasInPreviousVersion || !existsInDocker {
+            // Copy asset to Docker
             if err := docker.CopyToContainer(asset.Path, sharedAssetPath); err != nil {
-                fmt.Printf("Warning: failed to copy asset %s: %v\n", asset.Filename, err)
+                fmt.Println(ui.Warning(fmt.Sprintf("Failed to copy asset %s: %v", asset.Filename, err)))
                 continue
             }
-            fmt.Printf("✓ Copied new asset: %s\n", asset.Filename)
+            if !wasInPreviousVersion {
+                fmt.Println(ui.Success(fmt.Sprintf("Copied new asset: %s (%.2f MB)", asset.Filename, float64(asset.Size)/(1024*1024))))
+            } else {
+                fmt.Println(ui.Success(fmt.Sprintf("Copied asset: %s (was missing in Docker)", asset.Filename)))
+            }
         } else {
-            // Asset already exists, use existing path
+            // Asset exists in Docker and was in previous version - reuse it
             if existingPath := previousAssetsMap[asset.Filename]; existingPath != "" {
                 sharedAssetPath = existingPath
             }
-            fmt.Printf("✓ Reusing existing asset: %s\n", asset.Filename)
+            fmt.Println(ui.Success(fmt.Sprintf("Reusing existing asset: %s", asset.Filename)))
         }
         
         // Reference shared asset
@@ -510,7 +525,7 @@ func (p *Project) CommitWithPath(message string, aepxFilePath string) (*Version,
 	// Create asset tracking comparing with previous version
 	track := tracking.CreateTracking(version.Number, version.Message, currentAssetsInput, previousAssetsInput)
 	if err := tracking.SaveTracking(version.Number, dockerVersionDir, track); err != nil {
-		fmt.Printf("Warning: failed to save asset tracking: %v\n", err)
+		fmt.Println(ui.Warning(fmt.Sprintf("Failed to save asset tracking: %v", err)))
 	}
 
 	// Update project path to the latest committed file

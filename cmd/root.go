@@ -11,6 +11,8 @@ import (
 	"github.com/ajeebtech/vervideos/internal/docker"
 	"github.com/ajeebtech/vervideos/internal/project"
 	"github.com/ajeebtech/vervideos/internal/storage"
+	"github.com/ajeebtech/vervideos/internal/ui"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
 )
 
@@ -36,14 +38,80 @@ var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Print the version number",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Printf("vervids %s (commit: %s, built: %s)\n", version, commit, date)
+		printBoxedHeader()
+		if commit != "none" && commit != "" {
+			fmt.Printf("Commit: %s\n", commit)
+		}
+		if date != "unknown" && date != "" {
+			fmt.Printf("Built:  %s\n", date)
+		}
 	},
+}
+
+// Define header styles using Lip Gloss
+var (
+	headerStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("62")).
+			Padding(0, 1).
+			MarginBottom(1).
+			Align(lipgloss.Center).
+			Width(36)
+
+	headerTextStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("62")).
+			Bold(true)
+)
+
+// printBoxedHeader prints a nice boxed header with version info using Lip Gloss
+func printBoxedHeader() {
+	// Format version string - extract just the version number if it's a git version
+	versionStr := version
+	if strings.Contains(version, "-") {
+		// If it's a git version like "v0.1.0-8-g81e2737-dirty", extract just "v0.1.0"
+		parts := strings.Split(version, "-")
+		if len(parts) > 0 {
+			versionStr = parts[0]
+		}
+	}
+
+	// Create the header text
+	// Check if version already starts with 'v'
+	headerText := fmt.Sprintf("🌊 vervids CLI %s", versionStr)
+	if !strings.HasPrefix(versionStr, "v") && versionStr != "dev" {
+		headerText = fmt.Sprintf("🌊 vervids CLI v%s", versionStr)
+	}
+	if version == "dev" {
+		headerText = "🌊 vervids CLI (dev)"
+	}
+
+	// Style the header text and render in box
+	styledText := headerTextStyle.Render(headerText)
+	box := headerStyle.Render(styledText)
+	fmt.Println(box)
+}
+
+// Helper functions for styled output (using shared ui package)
+func successMsg(msg string) string {
+	return ui.Success(msg)
+}
+
+func errorMsg(msg string) string {
+	return ui.Error(msg)
+}
+
+func warningMsg(msg string) string {
+	return ui.Warning(msg)
+}
+
+func infoMsg(msg string) string {
+	return ui.Info(msg)
 }
 
 var initCmd = &cobra.Command{
 	Use:   "init [path/to/project.aepx]",
 	Short: "Initialize version control for an After Effects project",
-    Long: `Initialize version control for an .aepx file. This creates a local .vervids config and stores the initial version in Docker.
+	Long: `Initialize version control for an .aepx file. This creates a local .vervids config and stores the initial version in Docker.
 
 Docker is required (24.0.0 or newer). Files are stored under /vervids/<projectDir>/vXXX/ in the Docker volume.
 
@@ -56,21 +124,21 @@ Use --force to re-initialize the same project file (this will delete existing ve
 
 		// Check if file exists
 		if _, err := os.Stat(aepxFilePath); os.IsNotExist(err) {
-			fmt.Printf("❌ Error: File '%s' does not exist\n", aepxFilePath)
+			fmt.Println(errorMsg(fmt.Sprintf("File '%s' does not exist", aepxFilePath)))
 			os.Exit(1)
 		}
 
 		// Check if it's an .aepx file
 		if filepath.Ext(aepxFilePath) != ".aepx" {
-			fmt.Printf("❌ Error: File must have .aepx extension\n")
-			fmt.Println("Note: vervids works with .aepx (XML) files, not binary .ae files")
+			fmt.Println(errorMsg("File must have .aepx extension"))
+			fmt.Println(infoMsg("Note: vervids works with .aepx (XML) files, not binary .ae files"))
 			os.Exit(1)
 		}
 
 		// Get absolute path for comparison
 		absPath, err := filepath.Abs(aepxFilePath)
 		if err != nil {
-			fmt.Printf("❌ Error: %v\n", err)
+			fmt.Println(errorMsg(fmt.Sprintf("Error: %v", err)))
 			os.Exit(1)
 		}
 
@@ -84,67 +152,69 @@ Use --force to re-initialize the same project file (this will delete existing ve
 				if existingPath == absPath {
 					// Same file - user should use commit
 					if !force {
-						fmt.Println("❌ Error: This project file is already initialized")
+						fmt.Println(errorMsg("This project file is already initialized"))
 						fmt.Printf("  Existing project: %s\n", existingProj.ProjectName)
-						fmt.Println("  Use 'vervids commit \"message\" <file.aepx>' to save new versions")
-						fmt.Println("  Or use 'vervids delete <project-name>' to delete the project and start fresh")
+						fmt.Println(infoMsg("  Use 'vervids commit \"message\" <file.aepx>' to save new versions"))
+						fmt.Println(infoMsg("  Or use 'vervids delete <project-name>' to delete the project and start fresh"))
 						os.Exit(1)
 					}
 				} else {
 					// Different file - automatically remove old project
-					fmt.Println("⚠️  Found existing project for a different file")
+					fmt.Println(warningMsg("Found existing project for a different file"))
 					fmt.Printf("  Existing: %s\n", existingProj.ProjectName)
 					fmt.Printf("  New:      %s\n", filepath.Base(absPath))
-					fmt.Println("  Removing old project to initialize new one...")
+					fmt.Println(infoMsg("  Removing old project to initialize new one..."))
 				}
 			} else {
 				// Can't load existing project - might be corrupted or incomplete
 				if !force {
-					fmt.Println("⚠️  Found .vervids directory but couldn't load project")
-					fmt.Println("  Removing it to start fresh...")
+					fmt.Println(warningMsg("Found .vervids directory but couldn't load project"))
+					fmt.Println(infoMsg("  Removing it to start fresh..."))
 				} else {
-					fmt.Println("⚠️  Force flag detected: removing existing .vervids directory...")
+					fmt.Println(warningMsg("Force flag detected: removing existing .vervids directory..."))
 				}
 			}
-			
+
 			// Remove existing .vervids directory
 			if err := os.RemoveAll(storage.VerVidsDir); err != nil {
-				fmt.Printf("❌ Error removing existing .vervids directory: %v\n", err)
+				fmt.Println(errorMsg(fmt.Sprintf("Error removing existing .vervids directory: %v", err)))
 				os.Exit(1)
 			}
-			fmt.Println("✓ Removed existing .vervids directory")
+			fmt.Println(successMsg("Removed existing .vervids directory"))
 		}
 
-        if err := docker.EnsureDockerReady(); err != nil {
-            fmt.Printf("❌ %v\n", err)
-            os.Exit(1)
-        }
-
-        fmt.Println("🚀 Initializing vervids project (Docker storage)...")
-        proj, err := project.Initialize(absPath)
-		if err != nil {
-			fmt.Printf("❌ Error initializing project: %v\n", err)
+		if err := docker.EnsureDockerReady(); err != nil {
+			fmt.Println(errorMsg(fmt.Sprintf("%v", err)))
 			os.Exit(1)
 		}
 
-		fmt.Println("\n✓ Initialized vervids project")
-		fmt.Printf("✓ Project: %s\n", proj.ProjectName)
-		fmt.Printf("✓ Initial version stored (v000)\n")
-		
+		fmt.Println(infoMsg("🚀 Initializing vervids project (Docker storage)..."))
+		proj, err := project.Initialize(absPath)
+		if err != nil {
+			fmt.Println(errorMsg(fmt.Sprintf("Error initializing project: %v", err)))
+			os.Exit(1)
+		}
+
+		fmt.Println()
+		fmt.Println(successMsg("Initialized vervids project"))
+		fmt.Printf("%s Project: %s\n", ui.SuccessStyle.Render("✓"), proj.ProjectName)
+		fmt.Println(successMsg("Initial version stored (v000)"))
+
 		if len(proj.Versions) > 0 {
 			v := proj.Versions[0]
-			fmt.Printf("✓ Project file: %.2f MB\n", float64(v.Size)/(1024*1024))
-			fmt.Printf("✓ Assets tracked: %d files\n", v.AssetCount)
+			fmt.Printf("%s Project file: %.2f MB\n", ui.SuccessStyle.Render("✓"), float64(v.Size)/(1024*1024))
+			fmt.Printf("%s Assets tracked: %d files\n", ui.SuccessStyle.Render("✓"), v.AssetCount)
 			if v.TotalSize > 0 {
-				fmt.Printf("✓ Total size: %.2f MB\n", float64(v.TotalSize)/(1024*1024))
+				fmt.Printf("%s Total size: %.2f MB\n", ui.SuccessStyle.Render("✓"), float64(v.TotalSize)/(1024*1024))
 			}
 		}
 
-        fmt.Printf("✓ Storage: Docker volume '%s' under /vervids/<project>\n", proj.DockerVolume)
+		fmt.Printf("%s Storage: Docker volume '%s' under /vervids/<project>\n", ui.SuccessStyle.Render("✓"), proj.DockerVolume)
 
-		fmt.Println("\n📝 Next steps:")
-        fmt.Println("  • Make changes to your .aepx file or assets")
-        fmt.Println("  • Use 'vervids commit \"message\"' to save a new version")
+		fmt.Println()
+		fmt.Println(infoMsg("📝 Next steps:"))
+		fmt.Println(infoMsg("  • Make changes to your .aepx file or assets"))
+		fmt.Println(infoMsg("  • Use 'vervids commit \"message\" <file.aepx>' to save a new version"))
 	},
 }
 
@@ -163,46 +233,47 @@ Example: vervids commit "Added intro animation" "/path/to/exported.aepx"`,
 
 		// Check if initialized
 		if !storage.IsInitialized() {
-			fmt.Println("❌ Error: Not a vervids project")
-			fmt.Println("Run 'vervids init <file.aepx>' first")
+			fmt.Println(errorMsg("Not a vervids project"))
+			fmt.Println(infoMsg("Run 'vervids init <file.aepx>' first"))
 			os.Exit(1)
 		}
 
 		// Validate .aepx file
 		if _, err := os.Stat(aepxFilePath); os.IsNotExist(err) {
-			fmt.Printf("❌ Error: File '%s' does not exist\n", aepxFilePath)
+			fmt.Println(errorMsg(fmt.Sprintf("File '%s' does not exist", aepxFilePath)))
 			os.Exit(1)
 		}
 
 		if filepath.Ext(aepxFilePath) != ".aepx" {
-			fmt.Printf("❌ Error: File must have .aepx extension\n")
+			fmt.Println(errorMsg("File must have .aepx extension"))
 			os.Exit(1)
 		}
 
 		// Load project
 		proj, err := project.Load()
 		if err != nil {
-			fmt.Printf("❌ Error loading project: %v\n", err)
+			fmt.Println(errorMsg(fmt.Sprintf("Error loading project: %v", err)))
 			os.Exit(1)
 		}
 
 		// Get absolute path
 		absPath, err := filepath.Abs(aepxFilePath)
 		if err != nil {
-			fmt.Printf("❌ Error: %v\n", err)
+			fmt.Println(errorMsg(fmt.Sprintf("Error: %v", err)))
 			os.Exit(1)
 		}
 
-		fmt.Println("📦 Creating new version...")
+		fmt.Println(infoMsg("📦 Creating new version..."))
 
 		// Create new version with the provided .aepx file
 		v, err := proj.CommitWithPath(message, absPath)
 		if err != nil {
-			fmt.Printf("❌ Error committing version: %v\n", err)
+			fmt.Println(errorMsg(fmt.Sprintf("Error committing version: %v", err)))
 			os.Exit(1)
 		}
 
-		fmt.Printf("\n✓ Committed version %d\n", v.Number)
+		fmt.Println()
+		fmt.Println(successMsg(fmt.Sprintf("Committed version %d", v.Number)))
 		fmt.Printf("  Message: %s\n", v.Message)
 		fmt.Printf("  Time: %s\n", v.Timestamp.Format("2006-01-02 15:04:05"))
 		fmt.Printf("  Project file: %.2f MB\n", float64(v.Size)/(1024*1024))
@@ -210,11 +281,11 @@ Example: vervids commit "Added intro animation" "/path/to/exported.aepx"`,
 		if v.TotalSize > 0 {
 			fmt.Printf("  Total size: %.2f MB\n", float64(v.TotalSize)/(1024*1024))
 		}
-		
+
 		if proj.UseDocker {
-			fmt.Println("  Storage: Docker")
+			fmt.Println(infoMsg("  Storage: Docker"))
 		} else {
-			fmt.Println("  Storage: Local")
+			fmt.Println(infoMsg("  Storage: Local"))
 		}
 	},
 }
@@ -226,18 +297,18 @@ var listCmd = &cobra.Command{
 
 Example:
   vervids list              # Show all projects
-  vervids list 0             # Show commits for project #0`,
+  vervids list 1             # Show commits for project #1`,
 	Args: cobra.MaximumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		projects, err := project.GetAllProjects()
 		if err != nil {
-			fmt.Printf("❌ Error getting projects: %v\n", err)
+			fmt.Println(errorMsg(fmt.Sprintf("Error getting projects: %v", err)))
 			os.Exit(1)
 		}
 
 		if len(projects) == 0 {
-			fmt.Println("No projects found in Docker storage.")
-			fmt.Println("Use 'vervids init <file.aepx>' to create a project.")
+			fmt.Println(infoMsg("No projects found in Docker storage."))
+			fmt.Println(infoMsg("Use 'vervids init <file.aepx>' to create a project."))
 			return
 		}
 
@@ -245,33 +316,46 @@ Example:
 		if len(args) > 0 {
 			projectNum, err := strconv.Atoi(args[0])
 			if err != nil {
-				fmt.Printf("❌ Error: project number must be an integer\n")
+				fmt.Println(errorMsg("Project number must be an integer"))
 				os.Exit(1)
 			}
-			if projectNum < 0 || projectNum >= len(projects) {
-				fmt.Printf("❌ Error: project number %d does not exist (0-%d)\n", projectNum, len(projects)-1)
+			// Convert from 1-based user input to 0-based array index
+			projectIndex := projectNum - 1
+			if projectIndex < 0 || projectIndex >= len(projects) {
+				fmt.Println(errorMsg(fmt.Sprintf("Project number %d does not exist (1-%d)", projectNum, len(projects))))
 				os.Exit(1)
 			}
 
-			selectedProj := projects[projectNum]
+			selectedProj := projects[projectIndex]
 			showCommitsForProject(selectedProj.Name)
 			return
 		}
 
 		// Show all projects
-		fmt.Println("Projects in Docker storage:")
+		fmt.Println(infoMsg("Projects in Docker storage:"))
 		fmt.Println()
-		fmt.Println("#   Project Name")
-		fmt.Println("--  ------------------------------")
+		fmt.Println(infoMsg("#   Project Name"))
+		fmt.Println(infoMsg("--  ------------------------------"))
 		for i, p := range projects {
-			fmt.Printf("%02d  %s\n", i, p.Name)
+			// Display 1-based index
+			fmt.Printf("%s  %s\n", ui.InfoStyle.Render(fmt.Sprintf("%02d", i+1)), p.Name)
 		}
 		fmt.Println()
-		fmt.Println("Use 'vervids list <number>' to see commits for a project")
+		fmt.Println(infoMsg("Use 'vervids list <number>' to see commits for a project"))
 	},
 }
 
 func init() {
+	// Set custom help function to show boxed header
+	originalHelpFunc := rootCmd.HelpFunc()
+	rootCmd.SetHelpFunc(func(cmd *cobra.Command, args []string) {
+		// Only show header for root command help
+		if cmd == rootCmd {
+			printBoxedHeader()
+		}
+		originalHelpFunc(cmd, args)
+	})
+
 	rootCmd.AddCommand(versionCmd)
 	initCmd.Flags().BoolP("force", "f", false, "Force re-initialization of the same project file (removes existing version history)")
 	rootCmd.AddCommand(initCmd)
@@ -334,8 +418,8 @@ func showCommitsForProject(projectName string) {
 		configPath := filepath.Join(baseDir, storage.VerVidsDir, storage.ConfigFile)
 		if _, err := os.Stat(configPath); err == nil {
 			if loaded, err := project.LoadFromPath(configPath); err == nil {
-				if strings.Contains(filepath.Base(baseDir), projectName) || 
-				   strings.Contains(loaded.ProjectName, projectName) {
+				if strings.Contains(filepath.Base(baseDir), projectName) ||
+					strings.Contains(loaded.ProjectName, projectName) {
 					proj = loaded
 					break
 				}
@@ -344,8 +428,8 @@ func showCommitsForProject(projectName string) {
 	}
 
 	if proj == nil {
-		fmt.Printf("❌ Could not find config.json for project '%s'\n", projectName)
-		fmt.Println("Tip: Navigate to the project directory, or ensure .vervids/config.json exists.")
+		fmt.Println(errorMsg(fmt.Sprintf("Could not find config.json for project '%s'", projectName)))
+		fmt.Println(infoMsg("Tip: Navigate to the project directory, or ensure .vervids/config.json exists."))
 		os.Exit(1)
 	}
 
@@ -356,15 +440,15 @@ func showCommitsForProject(projectName string) {
 func showProjectCommits(proj *project.Project) {
 
 	if len(proj.Versions) == 0 {
-		fmt.Printf("Project: %s\n", proj.ProjectName)
-		fmt.Println("No commits yet. Use 'vervids commit \"message\"' to create one.")
+		fmt.Printf("%s Project: %s\n", ui.InfoStyle.Render("Project:"), proj.ProjectName)
+		fmt.Println(infoMsg("No commits yet. Use 'vervids commit \"message\" <file.aepx>' to create one."))
 		return
 	}
 
-	fmt.Printf("Project: %s\n", proj.ProjectName)
-	fmt.Printf("Commits: %d\n\n", len(proj.Versions))
-	fmt.Println("#   Time                 Size(MB)  Assets  Message")
-	fmt.Println("--  -------------------  -------  ------  ------------------------------")
+	fmt.Printf("%s Project: %s\n", ui.InfoStyle.Render("Project:"), proj.ProjectName)
+	fmt.Printf("%s Commits: %d\n\n", ui.InfoStyle.Render("Commits:"), len(proj.Versions))
+	fmt.Println(infoMsg("#   Time                 Size(MB)  Assets  Message"))
+	fmt.Println(infoMsg("--  -------------------  -------  ------  ------------------------------"))
 	for _, v := range proj.Versions {
 		fmt.Printf("%02d  %s  %7.2f  %6d  %s\n",
 			v.Number,
@@ -377,81 +461,81 @@ func showProjectCommits(proj *project.Project) {
 }
 
 var showCmd = &cobra.Command{
-    Use:   "show [version-number]",
-    Short: "Show details for a specific version",
-    Args:  cobra.ExactArgs(1),
-    Run: func(cmd *cobra.Command, args []string) {
-        if !storage.IsInitialized() {
-            fmt.Println("❌ Error: Not a vervids project")
-            fmt.Println("Run 'vervids init <file.aepx>' first")
-            os.Exit(1)
-        }
+	Use:   "show [version-number]",
+	Short: "Show details for a specific version",
+	Args:  cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		if !storage.IsInitialized() {
+			fmt.Println(errorMsg("Not a vervids project"))
+			fmt.Println(infoMsg("Run 'vervids init <file.aepx>' first"))
+			os.Exit(1)
+		}
 
-        var num int
-        if _, err := fmt.Sscanf(args[0], "%d", &num); err != nil {
-            fmt.Println("❌ Error: version-number must be an integer (e.g., 0, 1, 2)")
-            os.Exit(1)
-        }
+		var num int
+		if _, err := fmt.Sscanf(args[0], "%d", &num); err != nil {
+			fmt.Println(errorMsg("Version-number must be an integer (e.g., 0, 1, 2)"))
+			os.Exit(1)
+		}
 
-        proj, err := project.Load()
-        if err != nil {
-            fmt.Printf("❌ Error loading project: %v\n", err)
-            os.Exit(1)
-        }
+		proj, err := project.Load()
+		if err != nil {
+			fmt.Println(errorMsg(fmt.Sprintf("Error loading project: %v", err)))
+			os.Exit(1)
+		}
 
-        v, err := proj.GetVersion(num)
-        if err != nil {
-            fmt.Printf("❌ %v\n", err)
-            os.Exit(1)
-        }
+		v, err := proj.GetVersion(num)
+		if err != nil {
+			fmt.Println(errorMsg(fmt.Sprintf("%v", err)))
+			os.Exit(1)
+		}
 
-        fmt.Printf("Version:   %d\n", v.Number)
-        fmt.Printf("Message:   %s\n", v.Message)
-        fmt.Printf("Time:      %s\n", v.Timestamp.Format("2006-01-02 15:04:05"))
-        fmt.Printf("Proj Size: %.2f MB\n", float64(v.Size)/(1024*1024))
-        fmt.Printf("Assets:    %d files\n", v.AssetCount)
-        if v.DockerPath != "" {
-            fmt.Printf("Docker:    %s\n", v.DockerPath)
-        }
-        if len(v.Assets) > 0 {
-            fmt.Println()
-            fmt.Println("Assets:")
-            for _, a := range v.Assets {
-                fmt.Printf("  - %s (%s)  %.2f MB\n", a.Filename, a.Extension, float64(a.Size)/(1024*1024))
-            }
-        }
-    },
+		fmt.Printf("%s Version:   %d\n", ui.InfoStyle.Render("Version:"), v.Number)
+		fmt.Printf("%s Message:   %s\n", ui.InfoStyle.Render("Message:"), v.Message)
+		fmt.Printf("%s Time:      %s\n", ui.InfoStyle.Render("Time:"), v.Timestamp.Format("2006-01-02 15:04:05"))
+		fmt.Printf("%s Proj Size: %.2f MB\n", ui.InfoStyle.Render("Proj Size:"), float64(v.Size)/(1024*1024))
+		fmt.Printf("%s Assets:    %d files\n", ui.InfoStyle.Render("Assets:"), v.AssetCount)
+		if v.DockerPath != "" {
+			fmt.Printf("%s Docker:    %s\n", ui.InfoStyle.Render("Docker:"), v.DockerPath)
+		}
+		if len(v.Assets) > 0 {
+			fmt.Println()
+			fmt.Println(infoMsg("Assets:"))
+			for _, a := range v.Assets {
+				fmt.Printf("  - %s (%s)  %.2f MB\n", a.Filename, a.Extension, float64(a.Size)/(1024*1024))
+			}
+		}
+	},
 }
 
 var pruneCmd = &cobra.Command{
-    Use:   "prune",
-    Short: "Remove commits whose storage is missing in Docker",
-    Run: func(cmd *cobra.Command, args []string) {
-        if !storage.IsInitialized() {
-            fmt.Println("❌ Error: Not a vervids project")
-            fmt.Println("Run 'vervids init <file.aepx>' first")
-            os.Exit(1)
-        }
-        if err := docker.EnsureDockerReady(); err != nil {
-            fmt.Printf("❌ %v\n", err)
-            os.Exit(1)
-        }
-        proj, err := project.Load()
-        if err != nil {
-            fmt.Printf("❌ Error loading project: %v\n", err)
-            os.Exit(1)
-        }
-        removed, err := proj.PruneMissingDockerVersions()
-        if err != nil {
-            fmt.Printf("❌ Error pruning: %v\n", err)
-            os.Exit(1)
-        }
-        if removed == 0 {
-            fmt.Println("✓ Nothing to prune; all versions present in Docker")
-        } else {
-            fmt.Printf("✓ Pruned %d missing version(s)\n", removed)
-        }
-    },
+	Use:   "prune",
+	Short: "Remove commits whose storage is missing in Docker",
+	Run: func(cmd *cobra.Command, args []string) {
+		if !storage.IsInitialized() {
+			fmt.Println(errorMsg("Not a vervids project"))
+			fmt.Println(infoMsg("Run 'vervids init <file.aepx>' first"))
+			os.Exit(1)
+		}
+		if err := docker.EnsureDockerReady(); err != nil {
+			fmt.Println(errorMsg(fmt.Sprintf("%v", err)))
+			os.Exit(1)
+		}
+		proj, err := project.Load()
+		if err != nil {
+			fmt.Println(errorMsg(fmt.Sprintf("Error loading project: %v", err)))
+			os.Exit(1)
+		}
+		removed, err := proj.PruneMissingDockerVersions()
+		if err != nil {
+			fmt.Println(errorMsg(fmt.Sprintf("Error pruning: %v", err)))
+			os.Exit(1)
+		}
+		if removed == 0 {
+			fmt.Println(successMsg("Nothing to prune; all versions present in Docker"))
+		} else {
+			fmt.Println(successMsg(fmt.Sprintf("Pruned %d missing version(s)", removed)))
+		}
+	},
 }
 
 var deleteCmd = &cobra.Command{
@@ -469,14 +553,14 @@ Example:
 
 		// Ensure Docker is ready
 		if err := docker.EnsureDockerReady(); err != nil {
-			fmt.Printf("❌ %v\n", err)
+			fmt.Println(errorMsg(fmt.Sprintf("%v", err)))
 			os.Exit(1)
 		}
 
 		// Get all projects to find the one to delete
 		projects, err := project.GetAllProjects()
 		if err != nil {
-			fmt.Printf("❌ Error getting projects: %v\n", err)
+			fmt.Println(errorMsg(fmt.Sprintf("Error getting projects: %v", err)))
 			os.Exit(1)
 		}
 
@@ -484,58 +568,57 @@ Example:
 		var targetProject *project.ProjectInfo
 		for i, p := range projects {
 			// Exact match or partial match
-			if strings.EqualFold(p.Name, projectName) || 
-			   strings.Contains(strings.ToLower(p.Name), strings.ToLower(projectName)) {
+			if strings.EqualFold(p.Name, projectName) ||
+				strings.Contains(strings.ToLower(p.Name), strings.ToLower(projectName)) {
 				targetProject = &projects[i]
 				break
 			}
 		}
 
 		if targetProject == nil {
-			fmt.Printf("❌ Error: Project '%s' not found\n", projectName)
-			fmt.Println("\nAvailable projects:")
+			fmt.Println(errorMsg(fmt.Sprintf("Project '%s' not found", projectName)))
+			fmt.Println()
+			fmt.Println(infoMsg("Available projects:"))
 			for _, p := range projects {
-				fmt.Printf("  • %s\n", p.Name)
+				fmt.Printf("  %s %s\n", ui.InfoStyle.Render("•"), p.Name)
 			}
 			os.Exit(1)
 		}
 
 		// Show project info
-		fmt.Printf("Project: %s\n", targetProject.Name)
-		fmt.Printf("Path: %s\n", targetProject.DockerPath)
+		fmt.Printf("%s Project: %s\n", ui.InfoStyle.Render("Project:"), targetProject.Name)
+		fmt.Printf("%s Path: %s\n", ui.InfoStyle.Render("Path:"), targetProject.DockerPath)
 		fmt.Println()
 
 		// Confirmation prompt
-		fmt.Print("⚠️  WARNING: This will permanently delete all project data!\n")
-		fmt.Print("Type 'DELETE' to confirm: ")
-		
+		fmt.Print(warningMsg("WARNING: This will permanently delete all project data!\n"))
+		fmt.Print(infoMsg("Type 'DELETE' to confirm: "))
+
 		reader := bufio.NewReader(os.Stdin)
 		confirmation, err := reader.ReadString('\n')
 		if err != nil {
-			fmt.Printf("❌ Error reading input: %v\n", err)
+			fmt.Println(errorMsg(fmt.Sprintf("Error reading input: %v", err)))
 			os.Exit(1)
 		}
 
 		confirmation = strings.TrimSpace(confirmation)
 		if confirmation != "DELETE" {
-			fmt.Println("❌ Deletion cancelled (confirmation did not match)")
+			fmt.Println(errorMsg("Deletion cancelled (confirmation did not match)"))
 			os.Exit(1)
 		}
 
 		// Delete project
 		fmt.Println()
-		fmt.Println("🗑️  Deleting project...")
-		
+		fmt.Println(infoMsg("🗑️  Deleting project..."))
+
 		if err := project.DeleteProjectByName(targetProject.Name, targetProject.DockerPath); err != nil {
-			fmt.Printf("❌ Error deleting project: %v\n", err)
+			fmt.Println(errorMsg(fmt.Sprintf("Error deleting project: %v", err)))
 			os.Exit(1)
 		}
 
-		fmt.Println("✓ Project deleted successfully")
-		fmt.Println("  • All versions removed from Docker")
-		fmt.Println("  • All assets removed from Docker")
-		fmt.Println("  • Local .vervids directory removed (if found)")
+		fmt.Println(successMsg("Project deleted successfully"))
+		fmt.Println(successMsg("  • All versions removed from Docker"))
+		fmt.Println(successMsg("  • All assets removed from Docker"))
+		fmt.Println(successMsg("  • Local .vervids directory removed (if found)"))
 	},
 }
-
-
