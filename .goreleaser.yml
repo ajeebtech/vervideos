@@ -23,6 +23,7 @@ builds:
       - -X main.commit={{.Commit}}
       - -X main.date={{.Date}}
     main: .
+    binary: vervids
 
 archives:
   - format: tar.gz
@@ -60,7 +61,7 @@ brews:
     description: "A versioning command-line tool for video editors"
     license: "MIT"
     install: |
-      bin.install "vervideos"
+      bin.install "vervids"
     test: |
-      system "#{bin}/vervideos version"
+      system "#{bin}/vervids version"
 
