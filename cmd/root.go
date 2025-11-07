@@ -32,6 +32,57 @@ var rootCmd = &cobra.Command{
 	Use:   "vervids",
 	Short: "Version control for Adobe After Effects projects",
 	Long:  `vervids is a local version control system for .ae (Adobe After Effects) files.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		printBoxedHeader()
+
+		// Check if we have a project context
+		var proj *project.Project
+		var err error
+
+		if storage.HasContext() {
+			context, err := storage.LoadContext()
+			if err == nil {
+				proj, err = project.LoadFromPath(context.ConfigPath)
+				if err == nil {
+					// We have a valid project context, show commits
+					showProjectCommits(proj)
+					fmt.Println()
+					fmt.Println(infoMsg("Available commands:"))
+					fmt.Println(infoMsg("  • vervids commit \"message\" <file.aepx> - Commit a new version"))
+					fmt.Println(infoMsg("  • vervids list - List all projects"))
+					fmt.Println(infoMsg("  • vervids show <version> - Show version details"))
+					fmt.Println(infoMsg("  • vervids help - Show all commands"))
+					return
+				}
+			}
+		}
+
+		// No context or invalid context - try to select
+		proj, err = ensureProjectContext()
+		if err != nil {
+			if strings.Contains(err.Error(), "no projects available") {
+				fmt.Println()
+				fmt.Println(infoMsg("To get started:"))
+				fmt.Println(infoMsg("  • Use 'vervids init <file.aepx>' to initialize a new project"))
+				fmt.Println(infoMsg("  • Use 'vervids help' to see all available commands"))
+			} else {
+				fmt.Println(errorMsg(fmt.Sprintf("Error: %v", err)))
+			}
+			return
+		}
+
+		// After selecting a project, show its commits
+		if proj != nil {
+			fmt.Println()
+			showProjectCommits(proj)
+			fmt.Println()
+			fmt.Println(infoMsg("Available commands:"))
+			fmt.Println(infoMsg("  • vervids commit \"message\" <file.aepx> - Commit a new version"))
+			fmt.Println(infoMsg("  • vervids list - List all projects"))
+			fmt.Println(infoMsg("  • vervids show <version> - Show version details"))
+			fmt.Println(infoMsg("  • vervids help - Show all commands"))
+		}
+	},
 }
 
 var versionCmd = &cobra.Command{
@@ -211,6 +262,22 @@ Use --force to re-initialize the same project file (this will delete existing ve
 
 		fmt.Printf("%s Storage: Docker volume '%s' under /vervids/<project>\n", ui.SuccessStyle.Render("✓"), proj.DockerVolume)
 
+		// Save project context
+		configPath := storage.GetConfigPath()
+		absConfigPath, err := filepath.Abs(configPath)
+		if err != nil {
+			absConfigPath = configPath // Fallback to relative path
+		}
+		context := &storage.ProjectContext{
+			ProjectName: proj.ProjectName,
+			ConfigPath:  absConfigPath,
+		}
+		if err := storage.SaveContext(context); err != nil {
+			fmt.Println(warningMsg(fmt.Sprintf("Warning: Could not save project context: %v", err)))
+		} else {
+			fmt.Println(successMsg("Project context saved"))
+		}
+
 		fmt.Println()
 		fmt.Println(infoMsg("📝 Next steps:"))
 		fmt.Println(infoMsg("  • Make changes to your .aepx file or assets"))
@@ -231,10 +298,10 @@ Example: vervids commit "Added intro animation" "/path/to/exported.aepx"`,
 		message := args[0]
 		aepxFilePath := args[1]
 
-		// Check if initialized
-		if !storage.IsInitialized() {
-			fmt.Println(errorMsg("Not a vervids project"))
-			fmt.Println(infoMsg("Run 'vervids init <file.aepx>' first"))
+		// Get project from context (already ensured by PersistentPreRunE)
+		proj, err := ensureProjectContext()
+		if err != nil {
+			fmt.Println(errorMsg(fmt.Sprintf("Error: %v", err)))
 			os.Exit(1)
 		}
 
@@ -246,13 +313,6 @@ Example: vervids commit "Added intro animation" "/path/to/exported.aepx"`,
 
 		if filepath.Ext(aepxFilePath) != ".aepx" {
 			fmt.Println(errorMsg("File must have .aepx extension"))
-			os.Exit(1)
-		}
-
-		// Load project
-		proj, err := project.Load()
-		if err != nil {
-			fmt.Println(errorMsg(fmt.Sprintf("Error loading project: %v", err)))
 			os.Exit(1)
 		}
 
@@ -294,9 +354,10 @@ var listCmd = &cobra.Command{
 	Use:   "list [project-number]",
 	Short: "List projects or commits for a project",
 	Long: `List all projects stored in Docker. If a project number is provided, show commits for that project.
+You can also switch to a different project by selecting it from the list.
 
 Example:
-  vervids list              # Show all projects
+  vervids list              # Show all projects and option to switch
   vervids list 1             # Show commits for project #1`,
 	Args: cobra.MaximumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
@@ -331,6 +392,17 @@ Example:
 			return
 		}
 
+		// Show current project context if available
+		if storage.HasContext() {
+			context, err := storage.LoadContext()
+			if err == nil {
+				if proj, err := project.LoadFromPath(context.ConfigPath); err == nil {
+					fmt.Println(infoMsg(fmt.Sprintf("Current project: %s", proj.ProjectName)))
+					fmt.Println()
+				}
+			}
+		}
+
 		// Show all projects
 		fmt.Println(infoMsg("Projects in Docker storage:"))
 		fmt.Println()
@@ -338,11 +410,273 @@ Example:
 		fmt.Println(infoMsg("--  ------------------------------"))
 		for i, p := range projects {
 			// Display 1-based index
-			fmt.Printf("%s  %s\n", ui.InfoStyle.Render(fmt.Sprintf("%02d", i+1)), p.Name)
+			marker := "  "
+			if storage.HasContext() {
+				context, err := storage.LoadContext()
+				if err == nil {
+					if proj, err := project.LoadFromPath(context.ConfigPath); err == nil {
+						if strings.Contains(strings.ToLower(proj.ProjectName), strings.ToLower(p.Name)) ||
+							strings.Contains(strings.ToLower(p.Name), strings.ToLower(proj.ProjectName)) {
+							marker = "→ "
+						}
+					}
+				}
+			}
+			fmt.Printf("%s%s  %s\n", marker, ui.InfoStyle.Render(fmt.Sprintf("%02d", i+1)), p.Name)
 		}
 		fmt.Println()
 		fmt.Println(infoMsg("Use 'vervids list <number>' to see commits for a project"))
+
+		// Offer to switch project
+		fmt.Println()
+		reader := bufio.NewReader(os.Stdin)
+		fmt.Print(infoMsg("Switch to a different project? Enter project number (or press Enter to skip): "))
+		input, err := reader.ReadString('\n')
+		if err == nil {
+			input = strings.TrimSpace(input)
+			if input != "" {
+				projectNum, err := strconv.Atoi(input)
+				if err != nil {
+					fmt.Println(errorMsg("Invalid project number"))
+					return
+				}
+				projectIndex := projectNum - 1
+				if projectIndex < 0 || projectIndex >= len(projects) {
+					fmt.Println(errorMsg(fmt.Sprintf("Project number %d does not exist (1-%d)", projectNum, len(projects))))
+					return
+				}
+
+				selectedProj := projects[projectIndex]
+
+				// Find the config file for this project
+				home := os.Getenv("HOME")
+				searchDirs := []string{
+					".",
+					filepath.Join(home, "Documents"),
+					filepath.Join(home, "Desktop"),
+					filepath.Join(home, "Projects"),
+				}
+
+				var configPath string
+				for _, baseDir := range searchDirs {
+					if entries, err := os.ReadDir(baseDir); err == nil {
+						for _, entry := range entries {
+							if entry.IsDir() {
+								potentialConfigPath := filepath.Join(baseDir, entry.Name(), storage.VerVidsDir, storage.ConfigFile)
+								if _, err := os.Stat(potentialConfigPath); err == nil {
+									if proj, err := project.LoadFromPath(potentialConfigPath); err == nil {
+										// Check if this project matches
+										if strings.Contains(strings.ToLower(proj.ProjectName), strings.ToLower(selectedProj.Name)) ||
+											strings.Contains(strings.ToLower(selectedProj.Name), strings.ToLower(proj.ProjectName)) {
+											configPath = potentialConfigPath
+											break
+										}
+									}
+								}
+							}
+						}
+						if configPath != "" {
+							break
+						}
+					}
+				}
+
+				if configPath == "" {
+					fmt.Println(errorMsg(fmt.Sprintf("Could not find config file for project: %s", selectedProj.Name)))
+					return
+				}
+
+				// Load the project
+				proj, err := project.LoadFromPath(configPath)
+				if err != nil {
+					fmt.Println(errorMsg(fmt.Sprintf("Error loading project: %v", err)))
+					return
+				}
+
+				// Get absolute path for context
+				absConfigPath, err := filepath.Abs(configPath)
+				if err != nil {
+					absConfigPath = configPath
+				}
+
+				// Save context
+				context := &storage.ProjectContext{
+					ProjectName: proj.ProjectName,
+					ConfigPath:  absConfigPath,
+				}
+				if err := storage.SaveContext(context); err != nil {
+					fmt.Println(errorMsg(fmt.Sprintf("Error saving context: %v", err)))
+					return
+				}
+
+				fmt.Println(successMsg(fmt.Sprintf("Switched to project: %s", proj.ProjectName)))
+				fmt.Println()
+				// Show commits for the newly selected project
+				showProjectCommits(proj)
+				fmt.Println()
+				fmt.Println(infoMsg("Available commands:"))
+				fmt.Println(infoMsg("  • vervids commit \"message\" <file.aepx> - Commit a new version"))
+				fmt.Println(infoMsg("  • vervids list - List all projects"))
+				fmt.Println(infoMsg("  • vervids show <version> - Show version details"))
+				fmt.Println(infoMsg("  • vervids help - Show all commands"))
+				return
+			}
+		}
+
+		// If no switch was made, show commits for current project if available
+		if storage.HasContext() {
+			context, err := storage.LoadContext()
+			if err == nil {
+				if proj, err := project.LoadFromPath(context.ConfigPath); err == nil {
+					fmt.Println()
+					showProjectCommits(proj)
+					fmt.Println()
+					fmt.Println(infoMsg("Available commands:"))
+					fmt.Println(infoMsg("  • vervids commit \"message\" <file.aepx> - Commit a new version"))
+					fmt.Println(infoMsg("  • vervids list - List all projects"))
+					fmt.Println(infoMsg("  • vervids show <version> - Show version details"))
+					fmt.Println(infoMsg("  • vervids help - Show all commands"))
+				}
+			}
+		}
 	},
+}
+
+// selectProject prompts the user to select a project from available projects
+func selectProject() (*project.Project, error) {
+	projects, err := project.GetAllProjects()
+	if err != nil {
+		return nil, fmt.Errorf("error getting projects: %w", err)
+	}
+
+	if len(projects) == 0 {
+		fmt.Println(infoMsg("No projects found."))
+		fmt.Println()
+		fmt.Println(infoMsg("To get started:"))
+		fmt.Println(infoMsg("  • Use 'vervids init <file.aepx>' to initialize a new project"))
+		fmt.Println(infoMsg("  • Use 'vervids help' to see all available commands"))
+		return nil, fmt.Errorf("no projects available")
+	}
+
+	fmt.Println(infoMsg("Select a project to work with:"))
+	fmt.Println()
+	for i, p := range projects {
+		fmt.Printf("  %s  %s\n", ui.InfoStyle.Render(fmt.Sprintf("%d", i+1)), p.Name)
+	}
+	fmt.Println()
+
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Print(infoMsg("Enter project number (1-" + strconv.Itoa(len(projects)) + "): "))
+		input, err := reader.ReadString('\n')
+		if err != nil {
+			return nil, fmt.Errorf("error reading input: %w", err)
+		}
+
+		input = strings.TrimSpace(input)
+		projectNum, err := strconv.Atoi(input)
+		if err != nil || projectNum < 1 || projectNum > len(projects) {
+			fmt.Println(errorMsg(fmt.Sprintf("Please enter a number between 1 and %d", len(projects))))
+			continue
+		}
+
+		selectedProj := projects[projectNum-1]
+
+		// Find the config file for this project
+		// Search in common locations
+		home := os.Getenv("HOME")
+		searchDirs := []string{
+			".",
+			filepath.Join(home, "Documents"),
+			filepath.Join(home, "Desktop"),
+			filepath.Join(home, "Projects"),
+		}
+
+		var configPath string
+		for _, baseDir := range searchDirs {
+			if entries, err := os.ReadDir(baseDir); err == nil {
+				for _, entry := range entries {
+					if entry.IsDir() {
+						potentialConfigPath := filepath.Join(baseDir, entry.Name(), storage.VerVidsDir, storage.ConfigFile)
+						if _, err := os.Stat(potentialConfigPath); err == nil {
+							if proj, err := project.LoadFromPath(potentialConfigPath); err == nil {
+								// Check if this project matches
+								if strings.Contains(strings.ToLower(proj.ProjectName), strings.ToLower(selectedProj.Name)) ||
+									strings.Contains(strings.ToLower(selectedProj.Name), strings.ToLower(proj.ProjectName)) {
+									configPath = potentialConfigPath
+									break
+								}
+							}
+						}
+					}
+				}
+				if configPath != "" {
+					break
+				}
+			}
+		}
+
+		if configPath == "" {
+			return nil, fmt.Errorf("could not find config file for project: %s", selectedProj.Name)
+		}
+
+		// Load the project
+		proj, err := project.LoadFromPath(configPath)
+		if err != nil {
+			return nil, fmt.Errorf("error loading project: %w", err)
+		}
+
+		// Get absolute path for context
+		absConfigPath, err := filepath.Abs(configPath)
+		if err != nil {
+			absConfigPath = configPath // Fallback to relative path
+		}
+
+		// Save context
+		context := &storage.ProjectContext{
+			ProjectName: proj.ProjectName,
+			ConfigPath:  absConfigPath,
+		}
+		if err := storage.SaveContext(context); err != nil {
+			return nil, fmt.Errorf("error saving context: %w", err)
+		}
+
+		fmt.Println(successMsg(fmt.Sprintf("Selected project: %s", proj.ProjectName)))
+		return proj, nil
+	}
+}
+
+// ensureProjectContext ensures a project context is set, prompting if needed
+func ensureProjectContext() (*project.Project, error) {
+	// Check if we have a context
+	if storage.HasContext() {
+		context, err := storage.LoadContext()
+		if err != nil {
+			// Context file exists but is invalid, try to select again
+			storage.ClearContext()
+			return selectProject()
+		}
+
+		// Verify the config file still exists
+		if _, err := os.Stat(context.ConfigPath); err != nil {
+			// Config file doesn't exist, clear context and select again
+			storage.ClearContext()
+			return selectProject()
+		}
+
+		// Load the project
+		proj, err := project.LoadFromPath(context.ConfigPath)
+		if err != nil {
+			// Can't load project, clear context and select again
+			storage.ClearContext()
+			return selectProject()
+		}
+
+		return proj, nil
+	}
+
+	// No context, need to select a project
+	return selectProject()
 }
 
 func init() {
@@ -355,6 +689,44 @@ func init() {
 		}
 		originalHelpFunc(cmd, args)
 	})
+
+	// Add persistent pre-run hook to check for project context
+	// Commands that don't need context: init, version, help, list (when listing all), and root (when no subcommand)
+	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		// Skip context check for root command (handled in its Run function)
+		if cmd == rootCmd {
+			return nil
+		}
+
+		// Skip context check for these commands
+		skipContextCommands := []string{"init", "version", "help", "list"}
+		cmdName := cmd.Name()
+
+		// Check if this is one of the skip commands
+		for _, skipCmd := range skipContextCommands {
+			if cmdName == skipCmd {
+				// For list command, only skip if no args (listing all projects)
+				if cmdName == "list" && len(args) == 0 {
+					return nil
+				}
+				if cmdName != "list" {
+					return nil
+				}
+			}
+		}
+
+		// For other commands, ensure project context
+		_, err := ensureProjectContext()
+		if err != nil {
+			// If error is "no projects available", don't exit - let the command handle it
+			if strings.Contains(err.Error(), "no projects available") {
+				return nil
+			}
+			return err
+		}
+
+		return nil
+	}
 
 	rootCmd.AddCommand(versionCmd)
 	initCmd.Flags().BoolP("force", "f", false, "Force re-initialization of the same project file (removes existing version history)")
@@ -440,13 +812,13 @@ func showCommitsForProject(projectName string) {
 func showProjectCommits(proj *project.Project) {
 
 	if len(proj.Versions) == 0 {
-		fmt.Printf("%s Project: %s\n", ui.InfoStyle.Render("Project:"), proj.ProjectName)
+		fmt.Printf("%s: %s\n", ui.InfoStyle.Render("Project"), proj.ProjectName)
 		fmt.Println(infoMsg("No commits yet. Use 'vervids commit \"message\" <file.aepx>' to create one."))
 		return
 	}
 
-	fmt.Printf("%s Project: %s\n", ui.InfoStyle.Render("Project:"), proj.ProjectName)
-	fmt.Printf("%s Commits: %d\n\n", ui.InfoStyle.Render("Commits:"), len(proj.Versions))
+	fmt.Printf("%s: %s\n", ui.InfoStyle.Render("Project"), proj.ProjectName)
+	fmt.Printf("%s: %d\n\n", ui.InfoStyle.Render("Commits"), len(proj.Versions))
 	fmt.Println(infoMsg("#   Time                 Size(MB)  Assets  Message"))
 	fmt.Println(infoMsg("--  -------------------  -------  ------  ------------------------------"))
 	for _, v := range proj.Versions {
@@ -465,21 +837,16 @@ var showCmd = &cobra.Command{
 	Short: "Show details for a specific version",
 	Args:  cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
-		if !storage.IsInitialized() {
-			fmt.Println(errorMsg("Not a vervids project"))
-			fmt.Println(infoMsg("Run 'vervids init <file.aepx>' first"))
+		// Get project from context (already ensured by PersistentPreRunE)
+		proj, err := ensureProjectContext()
+		if err != nil {
+			fmt.Println(errorMsg(fmt.Sprintf("Error: %v", err)))
 			os.Exit(1)
 		}
 
 		var num int
 		if _, err := fmt.Sscanf(args[0], "%d", &num); err != nil {
 			fmt.Println(errorMsg("Version-number must be an integer (e.g., 0, 1, 2)"))
-			os.Exit(1)
-		}
-
-		proj, err := project.Load()
-		if err != nil {
-			fmt.Println(errorMsg(fmt.Sprintf("Error loading project: %v", err)))
 			os.Exit(1)
 		}
 
@@ -511,18 +878,14 @@ var pruneCmd = &cobra.Command{
 	Use:   "prune",
 	Short: "Remove commits whose storage is missing in Docker",
 	Run: func(cmd *cobra.Command, args []string) {
-		if !storage.IsInitialized() {
-			fmt.Println(errorMsg("Not a vervids project"))
-			fmt.Println(infoMsg("Run 'vervids init <file.aepx>' first"))
+		// Get project from context (already ensured by PersistentPreRunE)
+		proj, err := ensureProjectContext()
+		if err != nil {
+			fmt.Println(errorMsg(fmt.Sprintf("Error: %v", err)))
 			os.Exit(1)
 		}
 		if err := docker.EnsureDockerReady(); err != nil {
 			fmt.Println(errorMsg(fmt.Sprintf("%v", err)))
-			os.Exit(1)
-		}
-		proj, err := project.Load()
-		if err != nil {
-			fmt.Println(errorMsg(fmt.Sprintf("Error loading project: %v", err)))
 			os.Exit(1)
 		}
 		removed, err := proj.PruneMissingDockerVersions()

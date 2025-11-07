@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -10,7 +11,14 @@ const (
 	VerVidsDir     = ".vervids"
 	ConfigFile     = "config.json"
 	VersionsDir    = "versions"
+	ContextFile    = "current_project.json"
 )
+
+// ProjectContext stores the currently selected project
+type ProjectContext struct {
+	ProjectName string `json:"project_name"`
+	ConfigPath  string `json:"config_path"`
+}
 
 // IsInitialized checks if .vervids directory exists in current directory
 func IsInitialized() bool {
@@ -88,5 +96,54 @@ func GetFileSize(path string) (int64, error) {
 		return 0, err
 	}
 	return info.Size(), nil
+}
+
+// GetContextPath returns the path to the current project context file
+func GetContextPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		// Fallback to current directory
+		return filepath.Join(".vervids", ContextFile)
+	}
+	contextDir := filepath.Join(home, ".vervids")
+	os.MkdirAll(contextDir, 0755)
+	return filepath.Join(contextDir, ContextFile)
+}
+
+// SaveContext saves the current project context
+func SaveContext(context *ProjectContext) error {
+	contextPath := GetContextPath()
+	data, err := json.MarshalIndent(context, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(contextPath, data, 0644)
+}
+
+// LoadContext loads the current project context
+func LoadContext() (*ProjectContext, error) {
+	contextPath := GetContextPath()
+	data, err := os.ReadFile(contextPath)
+	if err != nil {
+		return nil, err
+	}
+	var context ProjectContext
+	if err := json.Unmarshal(data, &context); err != nil {
+		return nil, err
+	}
+	return &context, nil
+}
+
+// HasContext checks if a project context exists
+func HasContext() bool {
+	contextPath := GetContextPath()
+	_, err := os.Stat(contextPath)
+	return err == nil
+}
+
+// ClearContext removes the current project context
+func ClearContext() error {
+	contextPath := GetContextPath()
+	return os.Remove(contextPath)
 }
 
