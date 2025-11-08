@@ -51,6 +51,7 @@ var rootCmd = &cobra.Command{
 					fmt.Println(infoMsg("  • vervids commit \"message\" <file.aepx> - Commit a new version"))
 					fmt.Println(infoMsg("  • vervids list - List all projects"))
 					fmt.Println(infoMsg("  • vervids show <version> - Show version details"))
+					fmt.Println(infoMsg("  • vervids pull <version> - Pull a version from Docker"))
 					fmt.Println(infoMsg("  • vervids help - Show all commands"))
 					return
 				}
@@ -535,6 +536,7 @@ Example:
 					fmt.Println(infoMsg("  • vervids commit \"message\" <file.aepx> - Commit a new version"))
 					fmt.Println(infoMsg("  • vervids list - List all projects"))
 					fmt.Println(infoMsg("  • vervids show <version> - Show version details"))
+					fmt.Println(infoMsg("  • vervids pull <version> - Pull a version from Docker"))
 					fmt.Println(infoMsg("  • vervids help - Show all commands"))
 				}
 			}
@@ -735,6 +737,7 @@ func init() {
 	rootCmd.AddCommand(listCmd)
 	rootCmd.AddCommand(showCmd)
 	rootCmd.AddCommand(pruneCmd)
+	rootCmd.AddCommand(pullCmd)
 	rootCmd.AddCommand(deleteCmd)
 }
 
@@ -897,6 +900,78 @@ var pruneCmd = &cobra.Command{
 			fmt.Println(successMsg("Nothing to prune; all versions present in Docker"))
 		} else {
 			fmt.Println(successMsg(fmt.Sprintf("Pruned %d missing version(s)", removed)))
+		}
+	},
+}
+
+var pullCmd = &cobra.Command{
+	Use:   "pull <version> [output-dir]",
+	Short: "Pull a version from Docker storage to local filesystem",
+	Long: `Pull a specific version from Docker storage to your local filesystem.
+The .aepx file and all assets will be copied. If assets don't exist at their
+original paths, they will be copied from Docker storage and the .aepx file
+will be updated to reference the new asset locations.
+
+Requires a project to be selected. Use 'vervids list' to select a project.
+
+Example:
+  vervids pull 2              # Pull version 2 to current directory
+  vervids pull 1 ./restored   # Pull version 1 to ./restored directory`,
+	Args: cobra.RangeArgs(1, 2),
+	Run: func(cmd *cobra.Command, args []string) {
+		// Get project from context (already ensured by PersistentPreRunE)
+		proj, err := ensureProjectContext()
+		if err != nil {
+			if strings.Contains(err.Error(), "no projects available") {
+				fmt.Println(errorMsg("No projects available. Use 'vervids init <file.aepx>' to create a project first."))
+			} else {
+				fmt.Println(errorMsg(fmt.Sprintf("Error: %v", err)))
+			}
+			os.Exit(1)
+		}
+
+		if proj == nil {
+			fmt.Println(errorMsg("No project selected. Use 'vervids list' to select a project."))
+			os.Exit(1)
+		}
+
+		// Parse version number
+		versionNum, err := strconv.Atoi(args[0])
+		if err != nil {
+			fmt.Println(errorMsg("Version must be a number"))
+			os.Exit(1)
+		}
+
+		// Get output directory (default to current directory)
+		outputDir := "."
+		if len(args) > 1 {
+			outputDir = args[1]
+		}
+
+		// Convert to absolute path
+		absOutputDir, err := filepath.Abs(outputDir)
+		if err != nil {
+			fmt.Println(errorMsg(fmt.Sprintf("Error getting absolute path: %v", err)))
+			os.Exit(1)
+		}
+
+		fmt.Println(infoMsg(fmt.Sprintf("📦 Pulling version %d...", versionNum)))
+
+		// Pull the version
+		restoredPath, err := proj.RestoreVersion(versionNum, absOutputDir)
+		if err != nil {
+			fmt.Println(errorMsg(fmt.Sprintf("Error pulling version: %v", err)))
+			os.Exit(1)
+		}
+
+		fmt.Println()
+		fmt.Println(successMsg(fmt.Sprintf("✓ Successfully pulled version %d", versionNum)))
+		fmt.Printf("  Project file: %s\n", restoredPath)
+
+		// Check if assets directory exists (only show if assets were copied)
+		assetsDir := filepath.Join(absOutputDir, "assets")
+		if _, err := os.Stat(assetsDir); err == nil {
+			fmt.Printf("  Assets directory: %s\n", assetsDir)
 		}
 	},
 }

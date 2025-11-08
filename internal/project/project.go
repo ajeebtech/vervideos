@@ -729,3 +729,135 @@ func (p *Project) PruneMissingDockerVersions() (int, error) {
     return removed, nil
 }
 
+// RestoreVersion restores a specific version from Docker storage to local filesystem
+// It copies the .aepx file and updates asset paths if assets don't exist at their original locations
+// Returns the path to the restored .aepx file
+func (p *Project) RestoreVersion(versionNum int, outputDir string) (string, error) {
+	// Ensure Docker is ready
+	if err := docker.EnsureDockerReady(); err != nil {
+		return "", fmt.Errorf("Docker not available: %w", err)
+	}
+
+	// Get the version
+	version, err := p.GetVersion(versionNum)
+	if err != nil {
+		return "", err
+	}
+
+	if version.DockerPath == "" {
+		return "", fmt.Errorf("version %d has no Docker path", versionNum)
+	}
+
+	// Create output directory if it doesn't exist
+	if outputDir == "" {
+		outputDir = "."
+	}
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create output directory: %w", err)
+	}
+
+
+	// Copy .aepx file to final location first (we'll check assets relative to this location)
+	restoredAepxPath := filepath.Join(outputDir, filepath.Base(version.FilePath))
+	if err := docker.CopyFromContainer(version.DockerPath, restoredAepxPath); err != nil {
+		return "", fmt.Errorf("failed to copy .aepx file from Docker: %w", err)
+	}
+
+	// Parse the .aepx file to find asset references (using the final location)
+	parseResult, err := assets.ParseAEPX(restoredAepxPath, "")
+	if err != nil {
+		// Clean up the file if parsing fails
+		os.Remove(restoredAepxPath)
+		return "", fmt.Errorf("failed to parse .aepx file: %w", err)
+	}
+
+	// Check if all assets exist at their original paths
+	allAssetsExist := true
+	assetsNeedingDocker := []assets.Asset{}
+
+	for _, asset := range parseResult.Assets {
+		// Asset.Path from ParseAEPX is already resolved to absolute path
+		// based on the project directory, so we can check it directly
+		assetPath := filepath.Clean(asset.Path)
+
+		// Check if asset exists at its original path
+		if _, err := os.Stat(assetPath); err != nil {
+			// Asset doesn't exist, will need Docker
+			allAssetsExist = false
+			assetsNeedingDocker = append(assetsNeedingDocker, asset)
+		}
+	}
+
+	// If all assets exist locally, remove the copied .aepx file and return original path
+	if allAssetsExist && len(parseResult.Assets) > 0 {
+		os.Remove(restoredAepxPath)
+		// Return the original file path from the version
+		return version.FilePath, nil
+	}
+
+	// Some assets need Docker - update .aepx file with new paths
+	// Create assets directory in output directory
+	assetsDir := filepath.Join(outputDir, "assets")
+	if err := os.MkdirAll(assetsDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create assets directory: %w", err)
+	}
+
+	// Map to track path replacements
+	pathMap := make(map[string]string)
+	finalProjectDir := filepath.Dir(restoredAepxPath)
+
+	// Copy assets that don't exist locally
+	for _, asset := range assetsNeedingDocker {
+		// Find the asset in version.Assets to get Docker path
+		var dockerAssetPath string
+		for _, vAsset := range version.Assets {
+			if vAsset.Filename == asset.Filename {
+				dockerAssetPath = vAsset.DockerPath
+				break
+			}
+		}
+
+		if dockerAssetPath == "" {
+			// Asset not found in version metadata, try to find it in shared assets
+			projectBaseName := strings.TrimSuffix(filepath.Base(p.ProjectPath), filepath.Ext(p.ProjectPath))
+			projectID := sanitizeProjectName(projectBaseName)
+			dockerAssetPath = filepath.Join(docker.StoragePath, projectID, "assets", asset.Filename)
+		}
+
+		// Check if asset exists in Docker
+		if !docker.PathExistsInContainer(dockerAssetPath) {
+			fmt.Println(ui.Warning(fmt.Sprintf("Asset %s not found in Docker storage, skipping", asset.Filename)))
+			continue
+		}
+
+		// Copy asset from Docker to local assets directory
+		localAssetPath := filepath.Join(assetsDir, asset.Filename)
+		if err := docker.CopyFromContainer(dockerAssetPath, localAssetPath); err != nil {
+			fmt.Println(ui.Warning(fmt.Sprintf("Failed to copy asset %s from Docker: %v", asset.Filename, err)))
+			continue
+		}
+
+		// Calculate relative path from .aepx file to asset
+		relAssetPath, err := filepath.Rel(finalProjectDir, localAssetPath)
+		if err != nil {
+			// If relative path calculation fails, use absolute path
+			relAssetPath = localAssetPath
+		}
+
+		// Add to path map for updating .aepx file
+		// Use the original path from the parsed asset
+		pathMap[asset.Path] = relAssetPath
+		fmt.Println(ui.Success(fmt.Sprintf("Restored asset: %s -> %s", asset.Filename, relAssetPath)))
+	}
+
+	// Update .aepx file with new asset paths
+	if len(pathMap) > 0 {
+		if err := assets.UpdateAssetPaths(restoredAepxPath, pathMap); err != nil {
+			return "", fmt.Errorf("failed to update asset paths in .aepx file: %w", err)
+		}
+		fmt.Println(ui.Success(fmt.Sprintf("Updated %d asset path(s) in .aepx file", len(pathMap))))
+	}
+
+	return restoredAepxPath, nil
+}
+

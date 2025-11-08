@@ -181,3 +181,36 @@ func ParseAEPX(aepxPath string, scriptPath string) (*ParseResult, error) {
 func GetParserScriptPath() string {
 	return ""
 }
+
+// UpdateAssetPaths updates asset paths in an .aepx file
+// It replaces paths that don't exist locally with new paths (typically from Docker storage)
+// pathMap maps old paths to new paths
+func UpdateAssetPaths(aepxPath string, pathMap map[string]string) error {
+	// Read the entire file
+	data, err := os.ReadFile(aepxPath)
+	if err != nil {
+		return fmt.Errorf("failed to read .aepx file: %w", err)
+	}
+
+	content := string(data)
+	updated := false
+
+	// Replace each path in the map
+	for oldPath, newPath := range pathMap {
+		// Replace all occurrences of the old path with the new path
+		// Use strings.ReplaceAll to handle all occurrences
+		if strings.Contains(content, oldPath) {
+			content = strings.ReplaceAll(content, oldPath, newPath)
+			updated = true
+		}
+	}
+
+	// Only write if we made changes
+	if updated {
+		if err := os.WriteFile(aepxPath, []byte(content), 0644); err != nil {
+			return fmt.Errorf("failed to write updated .aepx file: %w", err)
+		}
+	}
+
+	return nil
+}
