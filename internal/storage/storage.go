@@ -2,6 +2,7 @@ package storage
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -28,17 +29,55 @@ func IsInitialized() bool {
 
 // Initialize creates the .vervids directory structure
 func Initialize() error {
+	// Get current working directory for error messages
+	cwd, _ := os.Getwd()
+	
+	// Check if current directory is writable
+	if err := checkDirectoryWritable("."); err != nil {
+		return fmt.Errorf("cannot create .vervids directory in '%s': %w. Please ensure you have write permissions.", cwd, err)
+	}
+	
 	// Create .vervids directory
 	if err := os.Mkdir(VerVidsDir, 0755); err != nil {
-		return err
+		if os.IsPermission(err) {
+			return fmt.Errorf("permission denied: cannot create .vervids directory in '%s'. Please check directory permissions.", cwd)
+		}
+		if os.IsExist(err) {
+			// Directory already exists, that's fine
+		} else {
+			return fmt.Errorf("failed to create .vervids directory: %w", err)
+		}
 	}
 
 	// Create versions directory
 	versionsPath := filepath.Join(VerVidsDir, VersionsDir)
 	if err := os.Mkdir(versionsPath, 0755); err != nil {
-		return err
+		if os.IsPermission(err) {
+			return fmt.Errorf("permission denied: cannot create versions directory. Please check directory permissions.")
+		}
+		if os.IsExist(err) {
+			// Directory already exists, that's fine
+		} else {
+			return fmt.Errorf("failed to create versions directory: %w", err)
+		}
 	}
 
+	return nil
+}
+
+// checkDirectoryWritable checks if a directory is writable by attempting to create a test file
+func checkDirectoryWritable(dir string) error {
+	testFile := filepath.Join(dir, ".vervids_write_test")
+	
+	// Try to create a test file
+	f, err := os.Create(testFile)
+	if err != nil {
+		return fmt.Errorf("directory is not writable: %w", err)
+	}
+	f.Close()
+	
+	// Clean up test file
+	os.Remove(testFile)
 	return nil
 }
 

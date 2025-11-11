@@ -194,6 +194,30 @@ Use --force to re-initialize the same project file (this will delete existing ve
 			os.Exit(1)
 		}
 
+		// Change to the directory containing the .aepx file
+		// This ensures .vervids is created in the same directory as the project file
+		aepxDir := filepath.Dir(absPath)
+		originalDir, err := os.Getwd()
+		if err != nil {
+			fmt.Println(errorMsg(fmt.Sprintf("Error getting current directory: %v", err)))
+			os.Exit(1)
+		}
+		
+		// Check if we can write to the .aepx file's directory
+		if err := os.Chdir(aepxDir); err != nil {
+			fmt.Println(errorMsg(fmt.Sprintf("Error: Cannot access directory '%s': %v", aepxDir, err)))
+			fmt.Println(infoMsg("This may be a permissions issue. Please ensure you have write access to the directory."))
+			os.Exit(1)
+		}
+		
+		// Restore original directory on exit
+		defer func() {
+			if err := os.Chdir(originalDir); err != nil {
+				// Non-fatal, just log
+				fmt.Println(warningMsg(fmt.Sprintf("Warning: Could not restore original directory: %v", err)))
+			}
+		}()
+
 		// Check if already initialized
 		if storage.IsInitialized() {
 			// Try to load existing project to see if it's for the same file
