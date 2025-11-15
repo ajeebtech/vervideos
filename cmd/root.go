@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/ajeebtech/vervideos/internal/api"
 	"github.com/ajeebtech/vervideos/internal/docker"
 	"github.com/ajeebtech/vervideos/internal/project"
 	"github.com/ajeebtech/vervideos/internal/storage"
@@ -330,6 +331,16 @@ Example: vervids commit "Added intro animation" "/path/to/exported.aepx"`,
 			os.Exit(1)
 		}
 
+		// Change to the directory containing the .vervids config file
+		// This ensures we can save the config.json file correctly
+		cleanup, err := changeToProjectDirectory()
+		if err != nil {
+			fmt.Println(errorMsg(fmt.Sprintf("Error: %v", err)))
+			fmt.Println(infoMsg("Please ensure you have write access to the directory."))
+			os.Exit(1)
+		}
+		defer cleanup()
+
 		// Validate .aepx file
 		if _, err := os.Stat(aepxFilePath); os.IsNotExist(err) {
 			fmt.Println(errorMsg(fmt.Sprintf("File '%s' does not exist", aepxFilePath)))
@@ -473,41 +484,12 @@ Example:
 
 				selectedProj := projects[projectIndex]
 
-				// Find the config file for this project
-				home := os.Getenv("HOME")
-				searchDirs := []string{
-					".",
-					filepath.Join(home, "Documents"),
-					filepath.Join(home, "Desktop"),
-					filepath.Join(home, "Projects"),
-				}
-
-				var configPath string
-				for _, baseDir := range searchDirs {
-					if entries, err := os.ReadDir(baseDir); err == nil {
-						for _, entry := range entries {
-							if entry.IsDir() {
-								potentialConfigPath := filepath.Join(baseDir, entry.Name(), storage.VerVidsDir, storage.ConfigFile)
-								if _, err := os.Stat(potentialConfigPath); err == nil {
-									if proj, err := project.LoadFromPath(potentialConfigPath); err == nil {
-										// Check if this project matches
-										if strings.Contains(strings.ToLower(proj.ProjectName), strings.ToLower(selectedProj.Name)) ||
-											strings.Contains(strings.ToLower(selectedProj.Name), strings.ToLower(proj.ProjectName)) {
-											configPath = potentialConfigPath
-											break
-										}
-									}
-								}
-							}
-						}
-						if configPath != "" {
-							break
-						}
-					}
-				}
-
-				if configPath == "" {
+				// Find the config file for this project using comprehensive search
+				configPath, err := findProjectConfigFile(selectedProj.Name)
+				if err != nil {
 					fmt.Println(errorMsg(fmt.Sprintf("Could not find config file for project: %s", selectedProj.Name)))
+					fmt.Println(infoMsg("Tip: Navigate to the project directory, or ensure .vervids/config.json exists."))
+					fmt.Println(infoMsg("The project exists in Docker storage, but the local config file is missing."))
 					return
 				}
 
@@ -568,6 +550,137 @@ Example:
 	},
 }
 
+// findProjectConfigFile searches for a project's config.json file comprehensively
+func findProjectConfigFile(projectName string) (string, error) {
+	home := os.Getenv("HOME")
+	searchDirs := []string{
+		".",
+		filepath.Join(home, "Documents"),
+		filepath.Join(home, "Desktop"),
+		filepath.Join(home, "Projects"),
+		filepath.Join(home, "Downloads"),
+	}
+
+	// First, try direct search in common locations (one level deep)
+	var configPath string
+	for _, baseDir := range searchDirs {
+		if entries, err := os.ReadDir(baseDir); err == nil {
+			for _, entry := range entries {
+				if entry.IsDir() {
+					potentialConfigPath := filepath.Join(baseDir, entry.Name(), storage.VerVidsDir, storage.ConfigFile)
+					if _, err := os.Stat(potentialConfigPath); err == nil {
+						if proj, err := project.LoadFromPath(potentialConfigPath); err == nil {
+							// Check if this project matches
+							projNameLower := strings.ToLower(proj.ProjectName)
+							searchNameLower := strings.ToLower(projectName)
+							// Remove file extensions for comparison
+							projBaseName := strings.TrimSuffix(projNameLower, ".aepx")
+							searchBaseName := strings.TrimSuffix(searchNameLower, ".aepx")
+							
+							if strings.Contains(projBaseName, searchBaseName) ||
+								strings.Contains(searchBaseName, projBaseName) ||
+								strings.Contains(projNameLower, searchNameLower) ||
+								strings.Contains(searchNameLower, projNameLower) {
+								configPath = potentialConfigPath
+								break
+							}
+						}
+					}
+				}
+			}
+			if configPath != "" {
+				break
+			}
+		}
+		// Also check if .vervids exists directly in baseDir
+		directConfigPath := filepath.Join(baseDir, storage.VerVidsDir, storage.ConfigFile)
+		if _, err := os.Stat(directConfigPath); err == nil {
+			if proj, err := project.LoadFromPath(directConfigPath); err == nil {
+				projNameLower := strings.ToLower(proj.ProjectName)
+				searchNameLower := strings.ToLower(projectName)
+				projBaseName := strings.TrimSuffix(projNameLower, ".aepx")
+				searchBaseName := strings.TrimSuffix(searchNameLower, ".aepx")
+				
+				if strings.Contains(projBaseName, searchBaseName) ||
+					strings.Contains(searchBaseName, projBaseName) ||
+					strings.Contains(projNameLower, searchNameLower) ||
+					strings.Contains(searchNameLower, projNameLower) {
+					configPath = directConfigPath
+					break
+				}
+			}
+		}
+	}
+
+	// If not found, try recursive search in Documents and Projects (max depth 3)
+	if configPath == "" {
+		deepSearchDirs := []string{
+			filepath.Join(home, "Documents"),
+			filepath.Join(home, "Projects"),
+		}
+		
+		for _, baseDir := range deepSearchDirs {
+			if found := findConfigRecursive(baseDir, projectName, 0, 3); found != "" {
+				configPath = found
+				break
+			}
+		}
+	}
+
+	if configPath == "" {
+		return "", fmt.Errorf("could not find config file for project: %s", projectName)
+	}
+
+	return configPath, nil
+}
+
+// findConfigRecursive recursively searches for config.json files
+func findConfigRecursive(dir string, projectName string, depth int, maxDepth int) string {
+	if depth > maxDepth {
+		return ""
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			// Skip hidden directories and .vervids itself
+			if strings.HasPrefix(entry.Name(), ".") && entry.Name() != "." && entry.Name() != ".." {
+				continue
+			}
+
+			// Check for config.json in this directory's .vervids subdirectory
+			configPath := filepath.Join(dir, entry.Name(), storage.VerVidsDir, storage.ConfigFile)
+			if _, err := os.Stat(configPath); err == nil {
+				if proj, err := project.LoadFromPath(configPath); err == nil {
+					projNameLower := strings.ToLower(proj.ProjectName)
+					searchNameLower := strings.ToLower(projectName)
+					projBaseName := strings.TrimSuffix(projNameLower, ".aepx")
+					searchBaseName := strings.TrimSuffix(searchNameLower, ".aepx")
+					
+					if strings.Contains(projBaseName, searchBaseName) ||
+						strings.Contains(searchBaseName, projBaseName) ||
+						strings.Contains(projNameLower, searchNameLower) ||
+						strings.Contains(searchNameLower, projNameLower) {
+						return configPath
+					}
+				}
+			}
+
+			// Recurse into subdirectories
+			subDir := filepath.Join(dir, entry.Name())
+			if found := findConfigRecursive(subDir, projectName, depth+1, maxDepth); found != "" {
+				return found
+			}
+		}
+	}
+
+	return ""
+}
+
 // selectProject prompts the user to select a project from available projects
 func selectProject() (*project.Project, error) {
 	projects, err := project.GetAllProjects()
@@ -608,42 +721,10 @@ func selectProject() (*project.Project, error) {
 
 		selectedProj := projects[projectNum-1]
 
-		// Find the config file for this project
-		// Search in common locations
-		home := os.Getenv("HOME")
-		searchDirs := []string{
-			".",
-			filepath.Join(home, "Documents"),
-			filepath.Join(home, "Desktop"),
-			filepath.Join(home, "Projects"),
-		}
-
-		var configPath string
-		for _, baseDir := range searchDirs {
-			if entries, err := os.ReadDir(baseDir); err == nil {
-				for _, entry := range entries {
-					if entry.IsDir() {
-						potentialConfigPath := filepath.Join(baseDir, entry.Name(), storage.VerVidsDir, storage.ConfigFile)
-						if _, err := os.Stat(potentialConfigPath); err == nil {
-							if proj, err := project.LoadFromPath(potentialConfigPath); err == nil {
-								// Check if this project matches
-								if strings.Contains(strings.ToLower(proj.ProjectName), strings.ToLower(selectedProj.Name)) ||
-									strings.Contains(strings.ToLower(selectedProj.Name), strings.ToLower(proj.ProjectName)) {
-									configPath = potentialConfigPath
-									break
-								}
-							}
-						}
-					}
-				}
-				if configPath != "" {
-					break
-				}
-			}
-		}
-
-		if configPath == "" {
-			return nil, fmt.Errorf("could not find config file for project: %s", selectedProj.Name)
+		// Find the config file for this project using comprehensive search
+		configPath, err := findProjectConfigFile(selectedProj.Name)
+		if err != nil {
+			return nil, err
 		}
 
 		// Load the project
@@ -670,6 +751,35 @@ func selectProject() (*project.Project, error) {
 		fmt.Println(successMsg(fmt.Sprintf("Selected project: %s", proj.ProjectName)))
 		return proj, nil
 	}
+}
+
+// changeToProjectDirectory changes the working directory to the directory containing
+// the .vervids config file. Returns a cleanup function to restore the original directory.
+func changeToProjectDirectory() (func(), error) {
+	context, err := storage.LoadContext()
+	if err != nil {
+		return nil, fmt.Errorf("error loading project context: %w", err)
+	}
+	
+	// ConfigPath is the full path to .vervids/config.json
+	// We need the directory containing .vervids (parent of .vervids)
+	configDir := filepath.Dir(filepath.Dir(context.ConfigPath))
+	originalDir, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("error getting current directory: %w", err)
+	}
+	
+	// Change to the directory containing .vervids
+	if err := os.Chdir(configDir); err != nil {
+		return nil, fmt.Errorf("cannot access directory '%s': %w (this may be a permissions issue)", configDir, err)
+	}
+	
+	// Return cleanup function
+	return func() {
+		if err := os.Chdir(originalDir); err != nil {
+			fmt.Println(warningMsg(fmt.Sprintf("Warning: Could not restore original directory: %v", err)))
+		}
+	}, nil
 }
 
 // ensureProjectContext ensures a project context is set, prompting if needed
@@ -725,7 +835,7 @@ func init() {
 		}
 
 		// Skip context check for these commands
-		skipContextCommands := []string{"init", "version", "help", "list"}
+		skipContextCommands := []string{"init", "version", "help", "list", "serve"}
 		cmdName := cmd.Name()
 
 		// Check if this is one of the skip commands
@@ -763,6 +873,7 @@ func init() {
 	rootCmd.AddCommand(pruneCmd)
 	rootCmd.AddCommand(pullCmd)
 	rootCmd.AddCommand(deleteCmd)
+	rootCmd.AddCommand(serveCmd)
 }
 
 func Execute() error {
@@ -771,7 +882,6 @@ func Execute() error {
 
 // showCommitsForProject finds and displays commits for a project by name
 func showCommitsForProject(projectName string) {
-	// Search for config.json files that match this project
 	// First try: look in current directory
 	if storage.IsInitialized() {
 		proj, err := project.Load()
@@ -785,50 +895,17 @@ func showCommitsForProject(projectName string) {
 		}
 	}
 
-	// Search common locations
-	home := os.Getenv("HOME")
-	searchDirs := []string{
-		".",
-		filepath.Join(home, "Documents"),
-		filepath.Join(home, "Desktop"),
-		filepath.Join(home, "Projects"),
-	}
-
-	var proj *project.Project
-	for _, baseDir := range searchDirs {
-		// Look for directories matching project name
-		if entries, err := os.ReadDir(baseDir); err == nil {
-			for _, entry := range entries {
-				if entry.IsDir() && strings.Contains(entry.Name(), projectName) {
-					configPath := filepath.Join(baseDir, entry.Name(), storage.VerVidsDir, storage.ConfigFile)
-					if _, err := os.Stat(configPath); err == nil {
-						if loaded, err := project.LoadFromPath(configPath); err == nil {
-							proj = loaded
-							break
-						}
-					}
-				}
-			}
-			if proj != nil {
-				break
-			}
-		}
-		// Also try .vervids directly in baseDir
-		configPath := filepath.Join(baseDir, storage.VerVidsDir, storage.ConfigFile)
-		if _, err := os.Stat(configPath); err == nil {
-			if loaded, err := project.LoadFromPath(configPath); err == nil {
-				if strings.Contains(filepath.Base(baseDir), projectName) ||
-					strings.Contains(loaded.ProjectName, projectName) {
-					proj = loaded
-					break
-				}
-			}
-		}
-	}
-
-	if proj == nil {
+	// Use comprehensive search to find the config file
+	configPath, err := findProjectConfigFile(projectName)
+	if err != nil {
 		fmt.Println(errorMsg(fmt.Sprintf("Could not find config.json for project '%s'", projectName)))
 		fmt.Println(infoMsg("Tip: Navigate to the project directory, or ensure .vervids/config.json exists."))
+		os.Exit(1)
+	}
+
+	proj, err := project.LoadFromPath(configPath)
+	if err != nil {
+		fmt.Println(errorMsg(fmt.Sprintf("Error loading project: %v", err)))
 		os.Exit(1)
 	}
 
@@ -911,6 +988,15 @@ var pruneCmd = &cobra.Command{
 			fmt.Println(errorMsg(fmt.Sprintf("Error: %v", err)))
 			os.Exit(1)
 		}
+		
+		// Change to the directory containing the .vervids config file
+		cleanup, err := changeToProjectDirectory()
+		if err != nil {
+			fmt.Println(errorMsg(fmt.Sprintf("Error: %v", err)))
+			os.Exit(1)
+		}
+		defer cleanup()
+		
 		if err := docker.EnsureDockerReady(); err != nil {
 			fmt.Println(errorMsg(fmt.Sprintf("%v", err)))
 			os.Exit(1)
@@ -1082,5 +1168,46 @@ Example:
 		fmt.Println(successMsg("  • All versions removed from Docker"))
 		fmt.Println(successMsg("  • All assets removed from Docker"))
 		fmt.Println(successMsg("  • Local .vervids directory removed (if found)"))
+	},
+}
+
+var serveCmd = &cobra.Command{
+	Use:   "serve [port]",
+	Short: "Start the HTTP API server for plugin access",
+	Long: `Start an HTTP API server that exposes vervids data for plugins.
+
+The server provides REST endpoints:
+  GET /api/projects - List all projects with their IDs
+  GET /api/projects/{id}/commits - Get commits for a specific project
+  GET /health - Health check endpoint
+
+Default port is 8080 if not specified.
+
+Example:
+  vervids serve        # Start server on port 8080
+  vervids serve 3000   # Start server on port 3000`,
+	Args: cobra.MaximumNArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		port := 8080
+		if len(args) > 0 {
+			p, err := strconv.Atoi(args[0])
+			if err != nil {
+				fmt.Println(errorMsg(fmt.Sprintf("Invalid port number: %v", err)))
+				os.Exit(1)
+			}
+			if p < 1 || p > 65535 {
+				fmt.Println(errorMsg("Port must be between 1 and 65535"))
+				os.Exit(1)
+			}
+			port = p
+		}
+
+		printBoxedHeader()
+		fmt.Println()
+
+		if err := api.StartServer(port); err != nil {
+			fmt.Println(errorMsg(fmt.Sprintf("Failed to start server: %v", err)))
+			os.Exit(1)
+		}
 	},
 }
