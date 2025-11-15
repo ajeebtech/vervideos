@@ -272,6 +272,19 @@ Use --force to re-initialize the same project file (this will delete existing ve
 			os.Exit(1)
 		}
 
+		// Delete the .aepx file after successful initialization and Docker execution
+		// Check if file still exists before attempting deletion
+		if _, err := os.Stat(absPath); err == nil {
+			if err := os.Remove(absPath); err != nil {
+				fmt.Println(warningMsg(fmt.Sprintf("Warning: Could not delete .aepx file '%s': %v", filepath.Base(absPath), err)))
+			} else {
+				fmt.Println(successMsg(fmt.Sprintf("✓ Deleted .aepx file: %s", filepath.Base(absPath))))
+			}
+		} else if os.IsNotExist(err) {
+			// File already doesn't exist (might have been deleted elsewhere)
+			fmt.Println(infoMsg(fmt.Sprintf("Note: .aepx file '%s' was already removed", filepath.Base(absPath))))
+		}
+
 		fmt.Println()
 		fmt.Println(successMsg("Initialized vervids project"))
 		fmt.Printf("%s Project: %s\n", ui.SuccessStyle.Render("✓"), proj.ProjectName)
