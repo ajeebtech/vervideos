@@ -426,6 +426,13 @@ Example:
   vervids list 1             # Show commits for project #1`,
 	Args: cobra.MaximumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
+		// Ensure Docker is ready before listing projects (will auto-start if needed)
+		if err := docker.EnsureDockerReady(); err != nil {
+			fmt.Println(errorMsg(fmt.Sprintf("Docker error: %v", err)))
+			fmt.Println(infoMsg("Please ensure Docker Desktop is running and try again."))
+			os.Exit(1)
+		}
+
 		projects, err := project.GetAllProjects()
 		if err != nil {
 			fmt.Println(errorMsg(fmt.Sprintf("Error getting projects: %v", err)))
