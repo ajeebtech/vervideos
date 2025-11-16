@@ -1,6 +1,7 @@
 package docker
 
 import (
+    "context"
     "errors"
     "fmt"
     "os/exec"
@@ -32,10 +33,11 @@ func IsDockerDaemonRunning() bool {
 	return err == nil
 }
 
-// StartDockerDesktop starts Docker Desktop (macOS)
+// StartDockerDesktop starts Docker Desktop (macOS) in the background
 func StartDockerDesktop() error {
-	// Try to start Docker Desktop on macOS
-	cmd := exec.Command("open", "-a", "Docker")
+	// Try to start Docker Desktop on macOS in the background
+	// The -g flag opens the application in the background without bringing it to the foreground
+	cmd := exec.Command("open", "-g", "-a", "Docker")
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to start Docker Desktop: %w", err)
 	}
@@ -180,12 +182,19 @@ func CopyFromContainer(srcPath, destPath string) error {
 	return nil
 }
 
-// ExecInContainer executes a command inside the container
+// ExecInContainer executes a command inside the container with a timeout
 func ExecInContainer(command ...string) (string, error) {
+	// Create context with 10 second timeout to prevent hanging
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	args := append([]string{"exec", ContainerName}, command...)
-	cmd := exec.Command("docker", args...)
+	cmd := exec.CommandContext(ctx, "docker", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("command timed out after 10 seconds")
+		}
 		return "", fmt.Errorf("failed to execute in container: %w", err)
 	}
 	return string(output), nil

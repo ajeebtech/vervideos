@@ -60,12 +60,20 @@ var rootCmd = &cobra.Command{
 			}
 		}
 
-		// No context or invalid context - try to select
+		// No context or invalid context - try to select (but don't block if Docker isn't ready)
 		proj, err = ensureProjectContext()
 		if err != nil {
 			if strings.Contains(err.Error(), "no projects available") {
 				fmt.Println()
 				fmt.Println(infoMsg("To get started:"))
+				fmt.Println(infoMsg("  • Use 'vervids init <file.aepx>' to initialize a new project"))
+				fmt.Println(infoMsg("  • Use 'vervids help' to see all available commands"))
+			} else if strings.Contains(err.Error(), "Docker") || strings.Contains(err.Error(), "timeout") {
+				// Docker-related error - show helpful message without blocking
+				fmt.Println()
+				fmt.Println(warningMsg("Docker is not available or not responding"))
+				fmt.Println(infoMsg("To get started:"))
+				fmt.Println(infoMsg("  • Ensure Docker Desktop is running"))
 				fmt.Println(infoMsg("  • Use 'vervids init <file.aepx>' to initialize a new project"))
 				fmt.Println(infoMsg("  • Use 'vervids help' to see all available commands"))
 			} else {
@@ -881,7 +889,10 @@ func recreateConfigFromDocker(projectName string) (string, error) {
 
 // selectProject prompts the user to select a project from available projects
 func selectProject() (*project.Project, error) {
+	// Show loading message since GetAllProjects might take a moment
+	fmt.Print(infoMsg("Loading projects... "))
 	projects, err := project.GetAllProjects()
+	fmt.Println() // New line after loading
 	if err != nil {
 		return nil, fmt.Errorf("error getting projects: %w", err)
 	}

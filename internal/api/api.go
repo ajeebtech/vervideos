@@ -65,6 +65,7 @@ func StartServer(port int) error {
 	fmt.Printf("   GET /api/projects - List all projects\n")
 	fmt.Printf("   GET /api/projects/match?path={filePath} - Match file path to project\n")
 	fmt.Printf("   GET /api/projects/{id}/commits - Get commits for a project\n")
+	fmt.Printf("   POST /api/projects/{id}/pull - Pull a version to local filesystem\n")
 	fmt.Printf("   GET /health - Health check\n")
 
 	return http.ListenAndServe(addr, nil)
@@ -130,16 +131,22 @@ func handleListProjects(w http.ResponseWriter, r *http.Request) {
 
 // handleGetProjectCommits handles GET /api/projects/{id}/commits
 func handleGetProjectCommits(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
-		return
-	}
-
 	// Check if this is the match endpoint BEFORE processing
 	// Go's ServeMux will match /api/projects/match to /api/projects/ handler
 	// So we need to check for it explicitly
 	if r.URL.Path == "/api/projects/match" || strings.HasPrefix(r.URL.Path, "/api/projects/match?") {
 		handleMatchProject(w, r)
+		return
+	}
+
+	// Check if this is a pull request
+	if strings.HasSuffix(r.URL.Path, "/pull") {
+		handlePullVersion(w, r)
+		return
+	}
+
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
@@ -658,6 +665,109 @@ func recreateConfigFromDockerAPI(projectName string) (string, error) {
 	}
 
 	return configPath, nil
+}
+
+// handlePullVersion handles POST /api/projects/{id}/pull
+func handlePullVersion(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "Method not allowed. Use POST")
+		return
+	}
+
+	// Extract project ID from path
+	// Path format: /api/projects/{id}/pull
+	path := strings.TrimPrefix(r.URL.Path, "/api/projects/")
+	path = strings.TrimSuffix(path, "/pull")
+	path = strings.TrimSuffix(path, "/")
+	projectID := path
+
+	if projectID == "" {
+		writeError(w, http.StatusBadRequest, "Project ID is required. Use: POST /api/projects/{id}/pull")
+		return
+	}
+
+	// Parse request body
+	var pullRequest struct {
+		Version   int    `json:"version"`
+		OutputDir string `json:"output_dir,omitempty"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&pullRequest); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
+		return
+	}
+
+	if pullRequest.Version < 0 {
+		writeError(w, http.StatusBadRequest, "Version number is required and must be >= 0")
+		return
+	}
+
+	// Find the project
+	projects, err := project.GetAllProjects()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to get projects: %v", err))
+		return
+	}
+
+	var targetProject *project.ProjectInfo
+	for i := range projects {
+		p := &projects[i]
+		relPath := strings.TrimPrefix(p.DockerPath, "/vervids/")
+		pathParts := strings.Split(relPath, "/")
+		projectIDFromPath := pathParts[len(pathParts)-1]
+
+		if projectIDFromPath == projectID {
+			targetProject = p
+			break
+		}
+	}
+
+	if targetProject == nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("Project with ID '%s' not found", projectID))
+		return
+	}
+
+	// Find and load the project config
+	configPath := findProjectConfig(targetProject.Name)
+	if configPath == "" {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("Config file not found for project '%s'", targetProject.Name))
+		return
+	}
+
+	proj, err := project.LoadFromPath(configPath)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to load project: %v", err))
+		return
+	}
+
+	// Determine output directory
+	outputDir := pullRequest.OutputDir
+	if outputDir == "" {
+		outputDir = "."
+	}
+	absOutputDir, err := filepath.Abs(outputDir)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid output directory: %v", err))
+		return
+	}
+
+	// Pull the version
+	restoredPath, err := proj.RestoreVersion(pullRequest.Version, absOutputDir)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to pull version: %v", err))
+		return
+	}
+
+	// Return the path
+	writeJSON(w, http.StatusOK, APIResponse{
+		Success: true,
+		Data: map[string]interface{}{
+			"file_path":    restoredPath,
+			"output_dir":   absOutputDir,
+			"version":      pullRequest.Version,
+			"project_name": proj.ProjectName,
+		},
+	})
 }
 
 // writeJSON writes a JSON response
