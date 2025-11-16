@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ajeebtech/vervideos/internal/api"
 	"github.com/ajeebtech/vervideos/internal/docker"
@@ -266,6 +267,7 @@ Use --force to re-initialize the same project file (this will delete existing ve
 		}
 
 		fmt.Println(infoMsg("🚀 Initializing vervids project (Docker storage)..."))
+		fmt.Printf("%s Working directory: %s\n", ui.InfoStyle.Render("→"), aepxDir)
 		proj, err := project.Initialize(absPath)
 		if err != nil {
 			fmt.Println(errorMsg(fmt.Sprintf("Error initializing project: %v", err)))
@@ -307,6 +309,10 @@ Use --force to re-initialize the same project file (this will delete existing ve
 		if err != nil {
 			absConfigPath = configPath // Fallback to relative path
 		}
+		
+		// Show where the config file was created
+		fmt.Printf("%s Project config: %s\n", ui.SuccessStyle.Render("✓"), absConfigPath)
+		
 		context := &storage.ProjectContext{
 			ProjectName: proj.ProjectName,
 			ConfigPath:  absConfigPath,
@@ -314,7 +320,9 @@ Use --force to re-initialize the same project file (this will delete existing ve
 		if err := storage.SaveContext(context); err != nil {
 			fmt.Println(warningMsg(fmt.Sprintf("Warning: Could not save project context: %v", err)))
 		} else {
-			fmt.Println(successMsg("Project context saved"))
+			// Show where the global context file was saved
+			contextPath := storage.GetContextPath()
+			fmt.Printf("%s Global context: %s\n", ui.SuccessStyle.Render("✓"), contextPath)
 		}
 
 		fmt.Println()
@@ -566,12 +574,18 @@ Example:
 // findProjectConfigFile searches for a project's config.json file comprehensively
 func findProjectConfigFile(projectName string) (string, error) {
 	home := os.Getenv("HOME")
+	// Expanded search directories to include more common locations
 	searchDirs := []string{
 		".",
 		filepath.Join(home, "Documents"),
 		filepath.Join(home, "Desktop"),
 		filepath.Join(home, "Projects"),
 		filepath.Join(home, "Downloads"),
+		filepath.Join(home, "Movies"),
+		filepath.Join(home, "Pictures"),
+		filepath.Join(home, "Videos"),
+		filepath.Join(home, "Library", "Application Support"),
+		filepath.Join(home, ".local", "share"),
 	}
 
 	// First, try direct search in common locations (one level deep)
@@ -625,18 +639,29 @@ func findProjectConfigFile(projectName string) (string, error) {
 		}
 	}
 
-	// If not found, try recursive search in Documents and Projects (max depth 3)
+	// If not found, try recursive search in Documents and Projects (max depth 5 for better coverage)
 	if configPath == "" {
 		deepSearchDirs := []string{
 			filepath.Join(home, "Documents"),
 			filepath.Join(home, "Projects"),
+			filepath.Join(home, "Desktop"),
+			filepath.Join(home, "Downloads"),
 		}
 		
 		for _, baseDir := range deepSearchDirs {
-			if found := findConfigRecursive(baseDir, projectName, 0, 3); found != "" {
+			if found := findConfigRecursive(baseDir, projectName, 0, 5); found != "" {
 				configPath = found
 				break
 			}
+		}
+	}
+
+	// If still not found, try to recreate config from Docker storage
+	if configPath == "" {
+		recreatedPath, err := recreateConfigFromDocker(projectName)
+		if err == nil && recreatedPath != "" {
+			fmt.Println(infoMsg(fmt.Sprintf("Recreated config file from Docker storage: %s", recreatedPath)))
+			return recreatedPath, nil
 		}
 	}
 
@@ -692,6 +717,166 @@ func findConfigRecursive(dir string, projectName string, depth int, maxDepth int
 	}
 
 	return ""
+}
+
+// recreateConfigFromDocker attempts to recreate a config file from Docker storage
+// when the local config file is missing. It creates a minimal config in the current directory.
+func recreateConfigFromDocker(projectName string) (string, error) {
+	// Get all projects from Docker
+	projects, err := project.GetAllProjects()
+	if err != nil {
+		return "", fmt.Errorf("failed to get projects from Docker: %w", err)
+	}
+
+	// Find the matching project
+	var targetProject *project.ProjectInfo
+	for i, p := range projects {
+		projNameLower := strings.ToLower(p.Name)
+		searchNameLower := strings.ToLower(projectName)
+		projBaseName := strings.TrimSuffix(projNameLower, ".aepx")
+		searchBaseName := strings.TrimSuffix(searchNameLower, ".aepx")
+		
+		if strings.Contains(projBaseName, searchBaseName) ||
+			strings.Contains(searchBaseName, projBaseName) ||
+			strings.Contains(projNameLower, searchNameLower) ||
+			strings.Contains(searchNameLower, projNameLower) {
+			targetProject = &projects[i]
+			break
+		}
+	}
+
+	if targetProject == nil {
+		return "", fmt.Errorf("project not found in Docker storage")
+	}
+
+	// Try to get version information from Docker
+	// List versions in Docker for this project
+	versionDirs, err := docker.ExecInContainer("sh", "-c", fmt.Sprintf(
+		"find %s -type d -name 'v[0-9][0-9][0-9]' -mindepth 1 -maxdepth 1 | sort",
+		targetProject.DockerPath))
+	if err != nil {
+		return "", fmt.Errorf("failed to list versions from Docker: %w", err)
+	}
+
+	versionLines := strings.Split(strings.TrimSpace(versionDirs), "\n")
+	if len(versionLines) == 0 || (len(versionLines) == 1 && versionLines[0] == "") {
+		return "", fmt.Errorf("no versions found in Docker for project")
+	}
+
+	// Create a minimal project config in the current directory
+	// Use the project name from Docker
+	currentDir, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("failed to get current directory: %w", err)
+	}
+
+	// Create .vervids directory if it doesn't exist
+	vervidsDir := filepath.Join(currentDir, storage.VerVidsDir)
+	if err := os.MkdirAll(vervidsDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create .vervids directory: %w", err)
+	}
+
+	// Create a minimal project structure
+	// We'll need to reconstruct versions from Docker, but for now create a basic one
+	configPath := storage.GetConfigPath()
+	
+	// Try to get the latest version's .aepx file name from Docker
+	latestVersionDir := strings.TrimSpace(versionLines[len(versionLines)-1])
+	aepxFiles, err := docker.ExecInContainer("sh", "-c", fmt.Sprintf(
+		"ls -1 %s/*.aepx 2>/dev/null | head -1", latestVersionDir))
+	if err != nil {
+		// If we can't find the .aepx file, use the project name
+		aepxFiles = targetProject.Name
+	} else {
+		aepxFiles = strings.TrimSpace(aepxFiles)
+		if aepxFiles != "" {
+			aepxFiles = filepath.Base(aepxFiles)
+		} else {
+			aepxFiles = targetProject.Name
+		}
+	}
+
+	// Try to reconstruct versions from Docker
+	versions := []project.Version{}
+	for i, versionDir := range versionLines {
+		versionDir = strings.TrimSpace(versionDir)
+		if versionDir == "" {
+			continue
+		}
+		
+		// Extract version number from directory name (e.g., "v000" -> 0)
+		versionNum := i
+		if len(versionDir) > 0 {
+			versionNumStr := strings.TrimPrefix(filepath.Base(versionDir), "v")
+			if num, err := strconv.Atoi(versionNumStr); err == nil {
+				versionNum = num
+			}
+		}
+		
+		// Get .aepx file path in Docker
+		dockerAepxPath := filepath.Join(versionDir, aepxFiles)
+		if !docker.PathExistsInContainer(dockerAepxPath) {
+			// Try to find any .aepx file in this version directory
+			aepxList, _ := docker.ExecInContainer("sh", "-c", fmt.Sprintf(
+				"ls -1 %s/*.aepx 2>/dev/null | head -1", versionDir))
+			if aepxList != "" {
+				dockerAepxPath = strings.TrimSpace(aepxList)
+			} else {
+				continue // Skip if no .aepx file found
+			}
+		}
+		
+		// Get file size from Docker (using wc -c for portability)
+		sizeOutput, _ := docker.ExecInContainer("wc", "-c", dockerAepxPath)
+		fileSize := int64(0)
+		if sizeStr := strings.TrimSpace(sizeOutput); sizeStr != "" {
+			// wc -c output format: "size filename" or just "size"
+			parts := strings.Fields(sizeStr)
+			if len(parts) > 0 {
+				if size, err := strconv.ParseInt(parts[0], 10, 64); err == nil {
+					fileSize = size
+				}
+			}
+		}
+		
+		// Create version entry
+		version := project.Version{
+			Number:     versionNum,
+			Message:    "Initial version",
+			Timestamp:  time.Now(), // We don't have exact timestamp from Docker
+			Size:       fileSize,
+			FilePath:   filepath.Join(currentDir, aepxFiles), // Placeholder
+			DockerPath: dockerAepxPath,
+			Assets:     []project.AssetInfo{}, // Assets will be loaded when needed
+			AssetCount: 0,
+			TotalSize:  fileSize,
+		}
+		
+		if versionNum == 0 {
+			version.Message = "Initial version"
+		} else {
+			version.Message = fmt.Sprintf("Version %d", versionNum)
+		}
+		
+		versions = append(versions, version)
+	}
+
+	// Create project config with reconstructed versions
+	minimalProj := &project.Project{
+		ProjectName:  aepxFiles,
+		ProjectPath:  filepath.Join(currentDir, aepxFiles), // Placeholder path
+		CreatedAt:    time.Now(), // We don't know the actual creation time
+		Versions:     versions,
+		UseDocker:    true,
+		DockerVolume: docker.VolumeName,
+	}
+
+	// Save the config
+	if err := minimalProj.Save(); err != nil {
+		return "", fmt.Errorf("failed to save recreated config: %w", err)
+	}
+
+	return configPath, nil
 }
 
 // selectProject prompts the user to select a project from available projects
