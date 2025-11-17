@@ -11,23 +11,10 @@ jobs:
       contents: write
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout main (for workflow)
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: main
-          path: workflow-files
-      
-      - name: Checkout tag (for release)
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          path: .
-      
-      - name: Copy updated workflow files
-        run: |
-          cp workflow-files/.goreleaser.yml .goreleaser.yml || true
-          rm -rf workflow-files
 
       - name: Set up Go
         uses: actions/setup-go@v5
