@@ -52,6 +52,16 @@ changelog:
       - '^chore:'
       - '^ci:'
 
+release:
+  github:
+    owner: ajeebtech
+    name: vervideos
+  mode: replace
+  header: |
+    ## What's Changed
+
+    Full Changelog: https://github.com/ajeebtech/vervideos/compare/{{ .PreviousTag }}...{{ .Tag }}
+
 brews:
   - repository:
       owner: ajeebtech
