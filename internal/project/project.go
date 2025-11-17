@@ -25,6 +25,14 @@ type AssetInfo struct {
 	DockerPath   string `json:"docker_path"`
 }
 
+// BranchInfo represents information about a branch
+type BranchInfo struct {
+	Name         string    `json:"name"`
+	SourceBranch string    `json:"source_branch,omitempty"` // Branch it was created from
+	SourceVersion int      `json:"source_version"`          // Version number it was created from
+	CreatedAt    time.Time `json:"created_at"`
+}
+
 // Version represents a single version/commit of the project
 type Version struct {
 	Number     int         `json:"number"`
@@ -36,16 +44,19 @@ type Version struct {
 	Assets     []AssetInfo `json:"assets"`
 	AssetCount int         `json:"asset_count"`
 	TotalSize  int64       `json:"total_size"`
+	Branch     string      `json:"branch,omitempty"` // Branch this version belongs to
 }
 
 // Project represents a vervids project
 type Project struct {
-	ProjectName  string    `json:"project_name"`
-	ProjectPath  string    `json:"project_path"`
-	CreatedAt    time.Time `json:"created_at"`
-	Versions     []Version `json:"versions"`
-	UseDocker    bool      `json:"use_docker"`
-	DockerVolume string    `json:"docker_volume,omitempty"`
+	ProjectName  string       `json:"project_name"`
+	ProjectPath  string       `json:"project_path"`
+	CreatedAt    time.Time    `json:"created_at"`
+	Versions     []Version    `json:"versions"`
+	UseDocker    bool         `json:"use_docker"`
+	DockerVolume string       `json:"docker_volume,omitempty"`
+	CurrentBranch string      `json:"current_branch,omitempty"` // Current active branch
+	Branches      []BranchInfo `json:"branches,omitempty"`       // All branches in the project
 }
 
 // Initialize creates a new project with the initial version (Docker-only storage)
@@ -72,8 +83,10 @@ func Initialize(aepxFilePath string) (*Project, error) {
 		ProjectPath:  aepxFilePath,
 		CreatedAt:    time.Now(),
 		Versions:     []Version{},
-		UseDocker:    true,
+		UseDocker:     true,
 		DockerVolume: docker.VolumeName,
+		CurrentBranch: "main", // Default branch name
+		Branches:      []BranchInfo{{Name: "main", SourceVersion: 0, CreatedAt: time.Now()}},
 	}
 
 	// Create initial version (version 0)
@@ -85,6 +98,7 @@ func Initialize(aepxFilePath string) (*Project, error) {
 		Assets:     []AssetInfo{},
 		AssetCount: 0,
 		TotalSize:  fileSize,
+		Branch:     "main", // Initial version on main branch
 	}
 
 	// Parse .aepx file for assets
@@ -191,6 +205,22 @@ func LoadFromPath(configPath string) (*Project, error) {
 	var proj Project
 	if err := json.Unmarshal(data, &proj); err != nil {
 		return nil, fmt.Errorf("failed to parse config: %w", err)
+	}
+
+	// Backward compatibility: if no branch info exists, initialize with main branch
+	if proj.CurrentBranch == "" {
+		proj.CurrentBranch = "main"
+		if len(proj.Branches) == 0 {
+			proj.Branches = []BranchInfo{{Name: "main", SourceVersion: 0, CreatedAt: proj.CreatedAt}}
+		}
+		// Update all versions without branch info to main branch
+		for i := range proj.Versions {
+			if proj.Versions[i].Branch == "" {
+				proj.Versions[i].Branch = "main"
+			}
+		}
+		// Save updated config
+		proj.Save()
 	}
 
 	return &proj, nil
@@ -402,6 +432,7 @@ func (p *Project) CommitWithPath(message string, aepxFilePath string) (*Version,
 		Assets:     []AssetInfo{},
 		AssetCount: 0,
 		TotalSize:  fileSize,
+		Branch:     p.GetCurrentBranch(), // Use current branch
 	}
 
 	// Parse .aepx file for assets
@@ -875,4 +906,120 @@ func (p *Project) RestoreVersion(versionNum int, outputDir string) (string, erro
 
 	// Always return the path to the restored .aepx file in the output directory
 	return restoredAepxPath, nil
+}
+
+// GetCurrentBranch returns the current active branch name
+func (p *Project) GetCurrentBranch() string {
+	if p.CurrentBranch == "" {
+		return "main" // Default branch
+	}
+	return p.CurrentBranch
+}
+
+// CreateBranch creates a new branch from a specific version
+// Returns the new branch info and error
+func (p *Project) CreateBranch(branchName string, sourceVersion int, sourceBranch string) (*BranchInfo, error) {
+	// Validate branch name
+	if branchName == "" {
+		return nil, fmt.Errorf("branch name cannot be empty")
+	}
+
+	// Check if branch already exists
+	for _, branch := range p.Branches {
+		if branch.Name == branchName {
+			return nil, fmt.Errorf("branch '%s' already exists", branchName)
+		}
+	}
+
+	// Validate source version exists
+	if sourceVersion < 0 || sourceVersion >= len(p.Versions) {
+		return nil, fmt.Errorf("source version %d does not exist", sourceVersion)
+	}
+
+	// If sourceBranch is empty, use the branch of the source version
+	if sourceBranch == "" {
+		sourceVersionObj, err := p.GetVersion(sourceVersion)
+		if err != nil {
+			return nil, err
+		}
+		sourceBranch = sourceVersionObj.Branch
+		if sourceBranch == "" {
+			sourceBranch = "main" // Default
+		}
+	}
+
+	// Create new branch info
+	newBranch := BranchInfo{
+		Name:         branchName,
+		SourceBranch: sourceBranch,
+		SourceVersion: sourceVersion,
+		CreatedAt:    time.Now(),
+	}
+
+	// Add to branches list
+	p.Branches = append(p.Branches, newBranch)
+
+	// Save config
+	if err := p.Save(); err != nil {
+		return nil, fmt.Errorf("failed to save config: %w", err)
+	}
+
+	return &newBranch, nil
+}
+
+// SwitchBranch switches to a different branch
+func (p *Project) SwitchBranch(branchName string) error {
+	// Check if branch exists
+	found := false
+	for _, branch := range p.Branches {
+		if branch.Name == branchName {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		return fmt.Errorf("branch '%s' does not exist", branchName)
+	}
+
+	// Switch to the branch
+	p.CurrentBranch = branchName
+
+	// Save config
+	if err := p.Save(); err != nil {
+		return fmt.Errorf("failed to save config: %w", err)
+	}
+
+	return nil
+}
+
+// GetBranchInfo returns information about a specific branch
+func (p *Project) GetBranchInfo(branchName string) (*BranchInfo, error) {
+	for i := range p.Branches {
+		if p.Branches[i].Name == branchName {
+			return &p.Branches[i], nil
+		}
+	}
+	return nil, fmt.Errorf("branch '%s' not found", branchName)
+}
+
+// GetVersionsForBranch returns all versions that belong to a specific branch
+func (p *Project) GetVersionsForBranch(branchName string) []Version {
+	var versions []Version
+	for _, v := range p.Versions {
+		if v.Branch == branchName {
+			versions = append(versions, v)
+		}
+	}
+	return versions
+}
+
+// GetLatestVersionForBranch returns the latest version for a specific branch
+func (p *Project) GetLatestVersionForBranch(branchName string) *Version {
+	versions := p.GetVersionsForBranch(branchName)
+	if len(versions) == 0 {
+		return nil
+	}
+	// Versions are stored in order, so the last one is the latest
+	return &versions[len(versions)-1]
 }

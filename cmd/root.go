@@ -400,6 +400,7 @@ Example: vervids commit "Added intro animation" "/path/to/exported.aepx"`,
 		fmt.Println()
 		fmt.Println(successMsg(fmt.Sprintf("Committed version %d", v.Number)))
 		fmt.Printf("  Message: %s\n", v.Message)
+		fmt.Printf("  Branch: %s\n", v.Branch)
 		fmt.Printf("  Time: %s\n", v.Timestamp.Format("2006-01-02 15:04:05"))
 		fmt.Printf("  Project file: %.2f MB\n", float64(v.Size)/(1024*1024))
 		fmt.Printf("  Assets: %d files\n", v.AssetCount)
@@ -1090,6 +1091,13 @@ func init() {
 	rootCmd.AddCommand(pullCmd)
 	rootCmd.AddCommand(deleteCmd)
 	rootCmd.AddCommand(serveCmd)
+	
+	// Branch subcommands
+	branchCmd.AddCommand(branchCreateCmd)
+	branchCmd.AddCommand(branchSwitchCmd)
+	branchCmd.AddCommand(branchListCmd)
+	branchCmd.AddCommand(branchShowCmd)
+	rootCmd.AddCommand(branchCmd)
 }
 
 func Execute() error {
@@ -1133,20 +1141,27 @@ func showProjectCommits(proj *project.Project) {
 
 	if len(proj.Versions) == 0 {
 		fmt.Printf("%s: %s\n", ui.InfoStyle.Render("Project"), proj.ProjectName)
+		fmt.Printf("%s: %s\n", ui.InfoStyle.Render("Branch"), proj.GetCurrentBranch())
 		fmt.Println(infoMsg("No commits yet. Use 'vervids commit \"message\" <file.aepx>' to create one."))
 		return
 	}
 
 	fmt.Printf("%s: %s\n", ui.InfoStyle.Render("Project"), proj.ProjectName)
+	fmt.Printf("%s: %s\n", ui.InfoStyle.Render("Branch"), proj.GetCurrentBranch())
 	fmt.Printf("%s: %d\n\n", ui.InfoStyle.Render("Commits"), len(proj.Versions))
-	fmt.Println(infoMsg("#   Time                 Size(MB)  Assets  Message"))
-	fmt.Println(infoMsg("--  -------------------  -------  ------  ------------------------------"))
+	fmt.Println(infoMsg("#   Time                 Size(MB)  Assets  Branch    Message"))
+	fmt.Println(infoMsg("--  -------------------  -------  ------  --------  ------------------------------"))
 	for _, v := range proj.Versions {
-		fmt.Printf("%02d  %s  %7.2f  %6d  %s\n",
+		branchName := v.Branch
+		if branchName == "" {
+			branchName = "main"
+		}
+		fmt.Printf("%02d  %s  %7.2f  %6d  %-8s  %s\n",
 			v.Number,
 			v.Timestamp.Format("2006-01-02 15:04:05"),
 			float64(v.Size)/(1024*1024),
 			v.AssetCount,
+			branchName,
 			v.Message,
 		)
 	}
@@ -1179,6 +1194,11 @@ var showCmd = &cobra.Command{
 		fmt.Printf("%s Version:   %d\n", ui.InfoStyle.Render("Version:"), v.Number)
 		fmt.Printf("%s Message:   %s\n", ui.InfoStyle.Render("Message:"), v.Message)
 		fmt.Printf("%s Time:      %s\n", ui.InfoStyle.Render("Time:"), v.Timestamp.Format("2006-01-02 15:04:05"))
+		branchName := v.Branch
+		if branchName == "" {
+			branchName = "main"
+		}
+		fmt.Printf("%s Branch:    %s\n", ui.InfoStyle.Render("Branch:"), branchName)
 		fmt.Printf("%s Proj Size: %.2f MB\n", ui.InfoStyle.Render("Proj Size:"), float64(v.Size)/(1024*1024))
 		fmt.Printf("%s Assets:    %d files\n", ui.InfoStyle.Render("Assets:"), v.AssetCount)
 		if v.DockerPath != "" {
@@ -1384,6 +1404,273 @@ Example:
 		fmt.Println(successMsg("  • All versions removed from Docker"))
 		fmt.Println(successMsg("  • All assets removed from Docker"))
 		fmt.Println(successMsg("  • Local .vervids directory removed (if found)"))
+	},
+}
+
+var branchCmd = &cobra.Command{
+	Use:   "branch [command] [args...]",
+	Short: "Manage branches for version control",
+	Long: `Branch management commands for creating and switching between branches.
+
+Branches allow you to create alternative versions of your project from any point in history.
+Each branch tracks where it was created from (source branch and version).
+
+Commands:
+  create <branch-name> [version]  - Create a new branch from a specific version
+  switch <branch-name>            - Switch to a different branch
+  list                             - List all branches
+  show <branch-name>               - Show details about a branch
+
+Examples:
+  vervids branch create feature-intro 2        # Create branch from version 2
+  vervids branch switch feature-intro         # Switch to feature-intro branch
+  vervids branch list                          # List all branches
+  vervids branch show feature-intro           # Show branch details`,
+	Args: cobra.NoArgs,
+	Run: func(cmd *cobra.Command, args []string) {
+		// Show help if no subcommand
+		cmd.Help()
+	},
+}
+
+var branchCreateCmd = &cobra.Command{
+	Use:   "create <branch-name> [version]",
+	Short: "Create a new branch from a specific version",
+	Long: `Create a new branch from a specific version. The branch will track where it was created from.
+
+If no version is specified, creates a branch from the latest version on the current branch.
+
+Example:
+  vervids branch create feature-intro 2    # Create branch from version 2
+  vervids branch create experimental       # Create branch from latest version`,
+	Args: cobra.RangeArgs(1, 2),
+	Run: func(cmd *cobra.Command, args []string) {
+		// Get project from context
+		proj, err := ensureProjectContext()
+		if err != nil {
+			fmt.Println(errorMsg(fmt.Sprintf("Error: %v", err)))
+			os.Exit(1)
+		}
+
+		// Change to the directory containing the .vervids config file
+		cleanup, err := changeToProjectDirectory()
+		if err != nil {
+			fmt.Println(errorMsg(fmt.Sprintf("Error: %v", err)))
+			os.Exit(1)
+		}
+		defer cleanup()
+
+		branchName := args[0]
+		sourceVersion := -1
+
+		// Parse version if provided
+		if len(args) > 1 {
+			versionNum, err := strconv.Atoi(args[1])
+			if err != nil {
+				fmt.Println(errorMsg("Version must be a number"))
+				os.Exit(1)
+			}
+			sourceVersion = versionNum
+		} else {
+			// Use latest version on current branch
+			latestVersion := proj.GetLatestVersionForBranch(proj.GetCurrentBranch())
+			if latestVersion == nil {
+				fmt.Println(errorMsg("No versions found on current branch"))
+				os.Exit(1)
+			}
+			sourceVersion = latestVersion.Number
+		}
+
+		// Get source version to determine source branch
+		sourceVersionObj, err := proj.GetVersion(sourceVersion)
+		if err != nil {
+			fmt.Println(errorMsg(fmt.Sprintf("Error: %v", err)))
+			os.Exit(1)
+		}
+
+		sourceBranch := sourceVersionObj.Branch
+		if sourceBranch == "" {
+			sourceBranch = "main"
+		}
+
+		// Create the branch
+		branchInfo, err := proj.CreateBranch(branchName, sourceVersion, sourceBranch)
+		if err != nil {
+			fmt.Println(errorMsg(fmt.Sprintf("Error creating branch: %v", err)))
+			os.Exit(1)
+		}
+
+		fmt.Println()
+		fmt.Println(successMsg(fmt.Sprintf("Created branch '%s'", branchName)))
+		fmt.Printf("  Source branch: %s\n", branchInfo.SourceBranch)
+		fmt.Printf("  Source version: %d\n", branchInfo.SourceVersion)
+		fmt.Printf("  Created at: %s\n", branchInfo.CreatedAt.Format("2006-01-02 15:04:05"))
+		fmt.Println()
+		fmt.Println(infoMsg("The branch has been created but you're still on the current branch."))
+		fmt.Println(infoMsg(fmt.Sprintf("Use 'vervids branch switch %s' to switch to the new branch.", branchName)))
+	},
+}
+
+var branchSwitchCmd = &cobra.Command{
+	Use:   "switch <branch-name>",
+	Short: "Switch to a different branch",
+	Long: `Switch to a different branch. All future commits will be on this branch.
+
+Example:
+  vervids branch switch feature-intro`,
+	Args: cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		// Get project from context
+		proj, err := ensureProjectContext()
+		if err != nil {
+			fmt.Println(errorMsg(fmt.Sprintf("Error: %v", err)))
+			os.Exit(1)
+		}
+
+		// Change to the directory containing the .vervids config file
+		cleanup, err := changeToProjectDirectory()
+		if err != nil {
+			fmt.Println(errorMsg(fmt.Sprintf("Error: %v", err)))
+			os.Exit(1)
+		}
+		defer cleanup()
+
+		branchName := args[0]
+
+		// Switch to the branch
+		if err := proj.SwitchBranch(branchName); err != nil {
+			fmt.Println(errorMsg(fmt.Sprintf("Error switching branch: %v", err)))
+			os.Exit(1)
+		}
+
+		// Get branch info
+		branchInfo, err := proj.GetBranchInfo(branchName)
+		if err != nil {
+			fmt.Println(warningMsg(fmt.Sprintf("Warning: Could not get branch info: %v", err)))
+		}
+
+		fmt.Println()
+		fmt.Println(successMsg(fmt.Sprintf("Switched to branch '%s'", branchName)))
+		if branchInfo != nil {
+			fmt.Printf("  Source branch: %s\n", branchInfo.SourceBranch)
+			fmt.Printf("  Source version: %d\n", branchInfo.SourceVersion)
+		}
+
+		// Show latest version on this branch
+		latestVersion := proj.GetLatestVersionForBranch(branchName)
+		if latestVersion != nil {
+			fmt.Printf("  Latest version: %d - %s\n", latestVersion.Number, latestVersion.Message)
+		} else {
+			fmt.Println("  No versions on this branch yet")
+		}
+	},
+}
+
+var branchListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List all branches",
+	Long: `List all branches in the project, showing which branch is currently active.
+
+Example:
+  vervids branch list`,
+	Args: cobra.NoArgs,
+	Run: func(cmd *cobra.Command, args []string) {
+		// Get project from context
+		proj, err := ensureProjectContext()
+		if err != nil {
+			fmt.Println(errorMsg(fmt.Sprintf("Error: %v", err)))
+			os.Exit(1)
+		}
+
+		fmt.Println()
+		fmt.Println(infoMsg("Branches:"))
+		fmt.Println()
+
+		if len(proj.Branches) == 0 {
+			fmt.Println(infoMsg("  No branches found (defaulting to 'main')"))
+			return
+		}
+
+		currentBranch := proj.GetCurrentBranch()
+		for _, branch := range proj.Branches {
+			marker := "  "
+			if branch.Name == currentBranch {
+				marker = "→ "
+			}
+
+			// Count versions on this branch
+			versions := proj.GetVersionsForBranch(branch.Name)
+			versionCount := len(versions)
+
+			fmt.Printf("%s%s", marker, ui.InfoStyle.Render(branch.Name))
+			if branch.Name == currentBranch {
+				fmt.Printf(" %s", ui.SuccessStyle.Render("(current)"))
+			}
+			fmt.Println()
+			fmt.Printf("    Source: %s (version %d)\n", branch.SourceBranch, branch.SourceVersion)
+			fmt.Printf("    Versions: %d\n", versionCount)
+			fmt.Printf("    Created: %s\n", branch.CreatedAt.Format("2006-01-02 15:04:05"))
+			fmt.Println()
+		}
+	},
+}
+
+var branchShowCmd = &cobra.Command{
+	Use:   "show <branch-name>",
+	Short: "Show details about a branch",
+	Long: `Show detailed information about a specific branch, including all versions on that branch.
+
+Example:
+  vervids branch show feature-intro`,
+	Args: cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		// Get project from context
+		proj, err := ensureProjectContext()
+		if err != nil {
+			fmt.Println(errorMsg(fmt.Sprintf("Error: %v", err)))
+			os.Exit(1)
+		}
+
+		branchName := args[0]
+
+		// Get branch info
+		branchInfo, err := proj.GetBranchInfo(branchName)
+		if err != nil {
+			fmt.Println(errorMsg(fmt.Sprintf("Error: %v", err)))
+			os.Exit(1)
+		}
+
+		// Get versions on this branch
+		versions := proj.GetVersionsForBranch(branchName)
+		currentBranch := proj.GetCurrentBranch()
+
+		fmt.Println()
+		fmt.Printf("%s: %s", ui.InfoStyle.Render("Branch"), branchName)
+		if branchName == currentBranch {
+			fmt.Printf(" %s", ui.SuccessStyle.Render("(current)"))
+		}
+		fmt.Println()
+		fmt.Printf("%s: %s (version %d)\n", ui.InfoStyle.Render("Source"), branchInfo.SourceBranch, branchInfo.SourceVersion)
+		fmt.Printf("%s: %s\n", ui.InfoStyle.Render("Created"), branchInfo.CreatedAt.Format("2006-01-02 15:04:05"))
+		fmt.Printf("%s: %d\n", ui.InfoStyle.Render("Versions"), len(versions))
+		fmt.Println()
+
+		if len(versions) > 0 {
+			fmt.Println(infoMsg("Versions on this branch:"))
+			fmt.Println(infoMsg("#   Time                 Size(MB)  Assets  Message"))
+			fmt.Println(infoMsg("--  -------------------  -------  ------  ------------------------------"))
+			for _, v := range versions {
+				fmt.Printf("%02d  %s  %7.2f  %6d  %s\n",
+					v.Number,
+					v.Timestamp.Format("2006-01-02 15:04:05"),
+					float64(v.Size)/(1024*1024),
+					v.AssetCount,
+					v.Message,
+				)
+			}
+		} else {
+			fmt.Println(infoMsg("No versions on this branch yet"))
+		}
 	},
 }
 

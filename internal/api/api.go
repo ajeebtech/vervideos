@@ -38,6 +38,29 @@ type CommitItem struct {
 	Size        int64  `json:"size"`
 	AssetCount  int    `json:"asset_count"`
 	TotalSize   int64  `json:"total_size"`
+	Branch      string `json:"branch,omitempty"`
+}
+
+// BranchItem represents a single branch
+type BranchItem struct {
+	Name         string  `json:"name"`
+	SourceBranch *string `json:"source_branch,omitempty"` // Use pointer to allow null in JSON
+	SourceVersion int    `json:"source_version"`
+	VersionCount int    `json:"version_count"`
+	CreatedAt    string  `json:"created_at"`
+}
+
+// BranchesResponse contains branches for a project
+type BranchesResponse struct {
+	Current string       `json:"current"`
+	Branches []BranchItem `json:"branches"`
+}
+
+// CurrentBranchResponse contains current branch info
+type CurrentBranchResponse struct {
+	Branch        string  `json:"branch"`
+	SourceBranch  *string `json:"source_branch,omitempty"` // Use pointer to allow null in JSON
+	SourceVersion int     `json:"source_version"`
 }
 
 // ProjectCommitsResponse contains commits for a project
@@ -54,7 +77,7 @@ func StartServer(port int) error {
 	// The exact match /api/projects/match must come before the prefix /api/projects/
 	mux.HandleFunc("/api/projects/match", handleMatchProject)
 	mux.HandleFunc("/api/projects", handleListProjects)
-	mux.HandleFunc("/api/projects/", handleGetProjectCommits)
+	mux.HandleFunc("/api/projects/", handleProjectRoutes)
 	mux.HandleFunc("/health", handleHealth)
 	
 	http.Handle("/", mux)
@@ -65,6 +88,9 @@ func StartServer(port int) error {
 	fmt.Printf("   GET /api/projects - List all projects\n")
 	fmt.Printf("   GET /api/projects/match?path={filePath} - Match file path to project\n")
 	fmt.Printf("   GET /api/projects/{id}/commits - Get commits for a project\n")
+	fmt.Printf("   GET /api/projects/{id}/branches - List all branches\n")
+	fmt.Printf("   GET /api/projects/{id}/branch/current - Get current branch\n")
+	fmt.Printf("   POST /api/projects/{id}/branches/switch - Switch branch\n")
 	fmt.Printf("   POST /api/projects/{id}/pull - Pull a version to local filesystem\n")
 	fmt.Printf("   GET /health - Health check\n")
 
@@ -129,6 +155,34 @@ func handleListProjects(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleProjectRoutes routes requests to appropriate handlers based on path
+func handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Path
+
+	// Check for branch-related endpoints
+	if strings.HasSuffix(path, "/branches") {
+		handleListBranches(w, r)
+		return
+	}
+	if strings.HasSuffix(path, "/branch/current") {
+		handleGetCurrentBranch(w, r)
+		return
+	}
+	if strings.HasSuffix(path, "/branches/switch") {
+		handleSwitchBranch(w, r)
+		return
+	}
+
+	// Check if this is a pull request
+	if strings.HasSuffix(path, "/pull") {
+		handlePullVersion(w, r)
+		return
+	}
+
+	// Default to commits handler
+	handleGetProjectCommits(w, r)
+}
+
 // handleGetProjectCommits handles GET /api/projects/{id}/commits
 func handleGetProjectCommits(w http.ResponseWriter, r *http.Request) {
 	// Check if this is the match endpoint BEFORE processing
@@ -136,12 +190,6 @@ func handleGetProjectCommits(w http.ResponseWriter, r *http.Request) {
 	// So we need to check for it explicitly
 	if r.URL.Path == "/api/projects/match" || strings.HasPrefix(r.URL.Path, "/api/projects/match?") {
 		handleMatchProject(w, r)
-		return
-	}
-
-	// Check if this is a pull request
-	if strings.HasSuffix(r.URL.Path, "/pull") {
-		handlePullVersion(w, r)
 		return
 	}
 
@@ -211,6 +259,10 @@ func handleGetProjectCommits(w http.ResponseWriter, r *http.Request) {
 	// Convert versions to commits
 	commits := make([]CommitItem, 0, len(proj.Versions))
 	for _, v := range proj.Versions {
+		branchName := v.Branch
+		if branchName == "" {
+			branchName = "main"
+		}
 		commits = append(commits, CommitItem{
 			Number:     v.Number,
 			Message:    v.Message,
@@ -218,6 +270,7 @@ func handleGetProjectCommits(w http.ResponseWriter, r *http.Request) {
 			Size:       v.Size,
 			AssetCount: v.AssetCount,
 			TotalSize:  v.TotalSize,
+			Branch:     branchName,
 		})
 	}
 
@@ -782,6 +835,218 @@ func writeError(w http.ResponseWriter, statusCode int, message string) {
 	writeJSON(w, statusCode, APIResponse{
 		Success: false,
 		Error:   message,
+	})
+}
+
+// getProjectByID finds and loads a project by its ID
+func getProjectByID(projectID string) (*project.Project, string, error) {
+	projects, err := project.GetAllProjects()
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to get projects: %w", err)
+	}
+
+	var targetProject *project.ProjectInfo
+	for i := range projects {
+		p := &projects[i]
+		relPath := strings.TrimPrefix(p.DockerPath, "/vervids/")
+		parts := strings.Split(relPath, "/")
+		projectIDFromPath := parts[len(parts)-1]
+
+		if projectIDFromPath == projectID {
+			targetProject = p
+			break
+		}
+	}
+
+	if targetProject == nil {
+		return nil, "", fmt.Errorf("project with ID '%s' not found", projectID)
+	}
+
+	configPath := findProjectConfig(targetProject.Name)
+	if configPath == "" {
+		return nil, "", fmt.Errorf("config file not found for project '%s'", targetProject.Name)
+	}
+
+	proj, err := project.LoadFromPath(configPath)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to load project: %w", err)
+	}
+
+	return proj, configPath, nil
+}
+
+// handleListBranches handles GET /api/projects/{id}/branches
+func handleListBranches(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	// Extract project ID from path
+	path := strings.TrimPrefix(r.URL.Path, "/api/projects/")
+	path = strings.TrimSuffix(path, "/branches")
+	path = strings.TrimSuffix(path, "/")
+	projectID := path
+
+	if projectID == "" {
+		writeError(w, http.StatusBadRequest, "Project ID is required. Use: GET /api/projects/{id}/branches")
+		return
+	}
+
+	proj, _, err := getProjectByID(projectID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	// Convert branches to API format
+	branches := make([]BranchItem, 0, len(proj.Branches))
+	for _, branch := range proj.Branches {
+		versions := proj.GetVersionsForBranch(branch.Name)
+		branchItem := BranchItem{
+			Name:         branch.Name,
+			SourceVersion: branch.SourceVersion,
+			VersionCount: len(versions),
+			CreatedAt:    branch.CreatedAt.Format("2006-01-02 15:04:05"),
+		}
+		if branch.SourceBranch != "" {
+			sourceBranch := branch.SourceBranch
+			branchItem.SourceBranch = &sourceBranch
+		}
+		branches = append(branches, branchItem)
+	}
+
+	response := BranchesResponse{
+		Current:  proj.GetCurrentBranch(),
+		Branches: branches,
+	}
+
+	writeJSON(w, http.StatusOK, APIResponse{
+		Success: true,
+		Data:    response,
+	})
+}
+
+// handleGetCurrentBranch handles GET /api/projects/{id}/branch/current
+func handleGetCurrentBranch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	// Extract project ID from path
+	path := strings.TrimPrefix(r.URL.Path, "/api/projects/")
+	path = strings.TrimSuffix(path, "/branch/current")
+	path = strings.TrimSuffix(path, "/")
+	projectID := path
+
+	if projectID == "" {
+		writeError(w, http.StatusBadRequest, "Project ID is required. Use: GET /api/projects/{id}/branch/current")
+		return
+	}
+
+	proj, _, err := getProjectByID(projectID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	currentBranchName := proj.GetCurrentBranch()
+	branchInfo, err := proj.GetBranchInfo(currentBranchName)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to get branch info: %v", err))
+		return
+	}
+
+	response := CurrentBranchResponse{
+		Branch:        branchInfo.Name,
+		SourceVersion: branchInfo.SourceVersion,
+	}
+	if branchInfo.SourceBranch != "" {
+		sourceBranch := branchInfo.SourceBranch
+		response.SourceBranch = &sourceBranch
+	}
+
+	writeJSON(w, http.StatusOK, APIResponse{
+		Success: true,
+		Data:    response,
+	})
+}
+
+// handleSwitchBranch handles POST /api/projects/{id}/branches/switch
+func handleSwitchBranch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "Method not allowed. Use POST")
+		return
+	}
+
+	// Extract project ID from path
+	path := strings.TrimPrefix(r.URL.Path, "/api/projects/")
+	path = strings.TrimSuffix(path, "/branches/switch")
+	path = strings.TrimSuffix(path, "/")
+	projectID := path
+
+	if projectID == "" {
+		writeError(w, http.StatusBadRequest, "Project ID is required. Use: POST /api/projects/{id}/branches/switch")
+		return
+	}
+
+	proj, configPath, err := getProjectByID(projectID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	// Parse request body
+	var switchRequest struct {
+		Branch string `json:"branch"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&switchRequest); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
+		return
+	}
+
+	if switchRequest.Branch == "" {
+		writeError(w, http.StatusBadRequest, "Branch name is required")
+		return
+	}
+
+	// Change to project directory to save config
+	configDir := filepath.Dir(filepath.Dir(configPath))
+	originalDir, _ := os.Getwd()
+	defer os.Chdir(originalDir)
+	
+	if err := os.Chdir(configDir); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to change to project directory: %v", err))
+		return
+	}
+
+	// Switch branch
+	if err := proj.SwitchBranch(switchRequest.Branch); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("Failed to switch branch: %v", err))
+		return
+	}
+
+	// Get updated branch info
+	branchInfo, err := proj.GetBranchInfo(switchRequest.Branch)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to get branch info: %v", err))
+		return
+	}
+
+	response := CurrentBranchResponse{
+		Branch:        branchInfo.Name,
+		SourceVersion: branchInfo.SourceVersion,
+	}
+	if branchInfo.SourceBranch != "" {
+		sourceBranch := branchInfo.SourceBranch
+		response.SourceBranch = &sourceBranch
+	}
+
+	writeJSON(w, http.StatusOK, APIResponse{
+		Success: true,
+		Data:    response,
 	})
 }
 
