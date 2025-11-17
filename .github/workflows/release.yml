@@ -21,14 +21,11 @@ jobs:
         with:
           go-version: '1.21'
 
-      - name: Install GoReleaser v2
-        run: |
-          curl -L https://github.com/goreleaser/goreleaser/releases/download/v2.12.7/goreleaser_Linux_x86_64.tar.gz | tar xz
-          sudo mv goreleaser /usr/local/bin/
-          goreleaser --version
-
       - name: Run GoReleaser
-        run: goreleaser release --clean
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
