@@ -27,12 +27,7 @@ builds:
 
 archives:
   - format: tar.gz
-    name_template: >-
-      {{ .ProjectName }}_
-      {{- title .Os }}_
-      {{- if eq .Arch "amd64" }}x86_64
-      {{- else if eq .Arch "386" }}i386
-      {{- else }}{{ .Arch }}{{ end }}
+    name_template: '{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}'
     format_overrides:
       - goos: windows
         format: zip
@@ -40,36 +35,7 @@ archives:
 checksum:
   name_template: 'checksums.txt'
 
-snapshot:
-  name_template: "{{ incpatch .Version }}-next"
-
-changelog:
-  sort: asc
-  filters:
-    exclude:
-      - '^docs:'
-      - '^test:'
-      - '^chore:'
-      - '^ci:'
-  use: git
-
 release:
   github:
     owner: ajeebtech
     name: vervideos
-  mode: replace
-
-# brews:
-#   - skip_upload: auto
-#     repository:
-#       owner: ajeebtech
-#       name: homebrew-tap
-#     directory: Formula
-#     homepage: "https://github.com/ajeebtech/vervideos"
-#     description: "A versioning command-line tool for video editors"
-#     license: "MIT"
-#     install: |
-#       bin.install "vervids"
-#     test: |
-#       system "#{bin}/vervids version"
-
